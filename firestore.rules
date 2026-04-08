@@ -1,0 +1,168 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required)
+    //   - publicKeySigning: string (required, Base64)
+    //   - publicKeyExchange: string (required, Base64)
+    //   - displayNameEncrypted: string (optional)
+    //   - photoURLEncrypted: string (optional)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: rooms
+    // Fields:
+    //   - id: string (required)
+    //   - nameEncrypted: string (optional)
+    //   - members: list (required, UIDs)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: rooms/{roomId}/keys/{userId}
+    // Fields:
+    //   - roomId: string (required)
+    //   - userId: string (required)
+    //   - encryptedKey: string (required, Base64)
+    //   - nonce: string (required, Base64)
+    //
+    // Collection: rooms/{roomId}/messages/{messageId}
+    // Fields:
+    //   - id: string (required)
+    //   - roomId: string (required)
+    //   - senderId: string (required)
+    //   - ciphertext: string (required, Base64)
+    //   - nonce: string (required, Base64)
+    //   - signature: string (required, Base64)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: backups
+    // Fields:
+    //   - userId: string (required)
+    //   - ciphertext: string (required, Base64)
+    //   - nonce: string (required, Base64)
+    //   - salt: string (required, Base64)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isRoomMember(roomId) {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/rooms/$(roomId)).data.members.hasAny([request.auth.uid]);
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    // User Profiles
+    match /users/{uid} {
+      // Authenticated users can read public keys to initiate chats
+      allow read: if isAuthenticated();
+      
+      function isValidUser(data) {
+        return hasRequiredFields(['uid', 'email', 'createdAt']) &&
+               data.uid == uid &&
+               isValidEmail(data.email);
+      }
+
+      // Only the user can create/update their own profile
+      allow create: if isOwner(uid) && isValidUser(request.resource.data);
+      
+      allow update: if isOwner(uid) && 
+                    isValidUser(request.resource.data) &&
+                    request.resource.data.uid == resource.data.uid &&
+                    request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    // Rooms
+    match /rooms/{roomId} {
+      // Members can read room info
+      allow read: if isAuthenticated() && resource.data.members.hasAny([request.auth.uid]);
+      
+      function isValidRoom(data) {
+        return hasRequiredFields(['id', 'members', 'createdAt']) &&
+               data.id == roomId &&
+               data.members is list &&
+               data.members.size() > 0 &&
+               data.members.hasAny([request.auth.uid]);
+      }
+
+      function isValidRoomUpdate(data) {
+        return data.diff(resource.data).affectedKeys().hasOnly(['members']) &&
+               data.members is list &&
+               data.members.size() <= 100 &&
+               data.members.hasAll(resource.data.members); // Ensure no one is removed
+      }
+
+      // Any authenticated user can create a room, but they must be a member
+      allow create: if isAuthenticated() && isValidRoom(request.resource.data);
+      
+      // Members can update room (e.g. add members)
+      allow update: if isAuthenticated() && 
+                    resource.data.members.hasAny([request.auth.uid]) &&
+                    isValidRoomUpdate(request.resource.data);
+
+      // Room Keys (Subcollection)
+      match /keys/{userId} {
+        // Only the specific user can read their own encrypted room key
+        allow read: if isOwner(userId);
+        
+        // Allow a user to create their own key, or an existing member to add a key for someone else
+        // We use getAfter to allow creation during a batch that also creates the room
+        allow create: if isOwner(userId) || isRoomMember(roomId) || (isAuthenticated() && getAfter(/databases/$(database)/documents/rooms/$(roomId)).data.members.hasAny([request.auth.uid]));
+        
+        // Users can update their own keys
+        allow update: if isOwner(userId);
+      }
+
+      // Messages (Subcollection)
+      match /messages/{messageId} {
+        // Members can read messages
+        allow read: if isRoomMember(roomId);
+        
+        // Members can send messages
+        allow create: if isRoomMember(roomId) && 
+                      hasRequiredFields(['id', 'roomId', 'senderId', 'ciphertext', 'nonce', 'signature', 'createdAt']) &&
+                      request.resource.data.senderId == request.auth.uid &&
+                      request.resource.data.roomId == roomId;
+        
+        // Messages are immutable
+        allow update, delete: if false;
+      }
+    }
+
+    // Backups
+    match /backups/{userId} {
+      // Only the user can read/write their own backup
+      allow read, write: if isOwner(userId);
+    }
+  }
+}

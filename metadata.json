@@ -1,0 +1,5 @@
+{
+  "name": "E2EE Chat",
+  "description": "A highly secure, end-to-end encrypted chat application with client-side key management and metadata minimization.",
+  "requestFramePermissions": []
+}

@@ -1,0 +1,93 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with public keys for E2EE",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayNameEncrypted": { "type": "string", "description": "Encrypted display name" },
+        "photoURLEncrypted": { "type": "string", "description": "Encrypted photo URL" },
+        "publicKeySigning": { "type": "string", "description": "Base64 Ed25519 public key" },
+        "publicKeyExchange": { "type": "string", "description": "Base64 X25519 public key" },
+        "devices": { "type": "array", "items": { "type": "string", "description": "Base64 X25519 device public keys" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "publicKeySigning", "publicKeyExchange"]
+    },
+    "Room": {
+      "title": "Room",
+      "description": "A chat room",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nameEncrypted": { "type": "string", "description": "Encrypted room name" },
+        "members": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "members"]
+    },
+    "RoomKey": {
+      "title": "RoomKey",
+      "description": "Encrypted room symmetric key for a specific user device",
+      "type": "object",
+      "properties": {
+        "roomId": { "type": "string" },
+        "userId": { "type": "string" },
+        "encryptedKey": { "type": "string", "description": "Room key encrypted with user's exchange public key" },
+        "nonce": { "type": "string" }
+      },
+      "required": ["roomId", "userId", "encryptedKey", "nonce"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "An encrypted message",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "roomId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "ciphertext": { "type": "string" },
+        "nonce": { "type": "string" },
+        "signature": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "roomId", "senderId", "ciphertext", "nonce", "signature"]
+    },
+    "Backup": {
+      "title": "Backup",
+      "description": "Encrypted private keys backup",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "ciphertext": { "type": "string" },
+        "nonce": { "type": "string" },
+        "salt": { "type": "string" }
+      },
+      "required": ["userId", "ciphertext", "nonce", "salt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "Chat rooms"
+    },
+    "/rooms/{roomId}/keys/{userId}": {
+      "schema": "RoomKey",
+      "description": "Encrypted room keys for members"
+    },
+    "/rooms/{roomId}/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Messages in a room"
+    },
+    "/backups/{userId}": {
+      "schema": "Backup",
+      "description": "User key backups"
+    }
+  }
+}

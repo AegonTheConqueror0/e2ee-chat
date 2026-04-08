@@ -229,6 +229,58 @@ export async function deriveKeyFromPassphrase(passphrase: string, salt: Uint8Arr
   );
 }
 
+export async function encryptRoomKeyWithPin(roomKey: Uint8Array, pin: string, pinSaltBase64: string): Promise<EncryptedData> {
+  await initSodium();
+  const pinKey = await deriveKeyFromPassphrase(pin, sodium.from_base64(pinSaltBase64));
+  const nonce = sodium.randombytes_buf(sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
+  const ciphertext = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
+    roomKey,
+    null,
+    null,
+    nonce,
+    pinKey
+  );
+  return {
+    ciphertext: sodium.to_base64(ciphertext),
+    nonce: sodium.to_base64(nonce),
+  };
+}
+
+export async function decryptRoomKeyWithPin(encrypted: EncryptedData, pin: string, pinSaltBase64: string): Promise<Uint8Array> {
+  await initSodium();
+  const pinKey = await deriveKeyFromPassphrase(pin, sodium.from_base64(pinSaltBase64));
+  const ciphertext = sodium.from_base64(encrypted.ciphertext);
+  const nonce = sodium.from_base64(encrypted.nonce);
+  return sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+    null,
+    ciphertext,
+    null,
+    nonce,
+    pinKey
+  );
+}
+
+const ROOM_KEY_BACKUP_PREFIX = 'room-key-backup:';
+
+export async function saveRoomKeyBackup(roomId: string, pin: string, pinSaltBase64: string, roomKey: Uint8Array) {
+  const encrypted = await encryptRoomKeyWithPin(roomKey, pin, pinSaltBase64);
+  await set(`${ROOM_KEY_BACKUP_PREFIX}${roomId}`, encrypted);
+}
+
+export async function loadRoomKeyBackup(roomId: string, pin: string, pinSaltBase64: string): Promise<Uint8Array | null> {
+  const backup = await get(`${ROOM_KEY_BACKUP_PREFIX}${roomId}`) as EncryptedData | undefined;
+  if (!backup) return null;
+  try {
+    return await decryptRoomKeyWithPin(backup, pin, pinSaltBase64);
+  } catch {
+    return null;
+  }
+}
+
+export async function clearRoomKeyBackup(roomId: string) {
+  await del(`${ROOM_KEY_BACKUP_PREFIX}${roomId}`);
+}
+
 export async function backupKeys(keys: IdentityKeys, passphrase: string): Promise<EncryptedData & { salt: string; publicSigning: string; publicExchange: string }> {
   await initSodium();
   const salt = sodium.randombytes_buf(16);

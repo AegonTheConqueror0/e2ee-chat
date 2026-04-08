@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { User as FirebaseUser } from 'firebase/auth';
-import { IdentityKeys, encryptSymmetric, decryptSymmetric, decryptSymmetricBytes, generateRoomKey, signData, verifySignature, encryptAsymmetric, decryptAsymmetric, hashRoomPin, verifyRoomPin, toBase64, fromBase64 } from '@/lib/crypto';
+import { IdentityKeys, encryptSymmetric, decryptSymmetric, decryptSymmetricBytes, generateRoomKey, signData, verifySignature, encryptAsymmetric, decryptAsymmetric, hashRoomPin, verifyRoomPin, toBase64, fromBase64, saveRoomKeyBackup, loadRoomKeyBackup } from '@/lib/crypto';
 import { db, collection, query, where, onSnapshot, orderBy, addDoc, serverTimestamp, doc, getDoc, setDoc, getDocs, storage, auth, handleFirestoreError, OperationType, updateDoc, arrayUnion, limit, writeBatch, deleteDoc } from '@/firebase';
 import { ref, uploadBytes, getDownloadURL, listAll, deleteObject } from 'firebase/storage';
 import { Button } from '@/components/ui/button';
@@ -245,7 +245,7 @@ export default function Chat({ user, keys }: ChatProps) {
             }
           } catch (err) {
             console.error('Failed to decrypt room key:', err);
-            toast.error(`Failed to decrypt key for room "${room.id.slice(0, 8)}...". This room might have been encrypted for a different device or identity.`, {
+            toast.error(`Failed to decrypt key for room "${room.id.slice(0, 8)}...". Enter the room PIN to restore local cached access if available.`, {
               id: `decrypt-fail-${room.id}`,
             });
           }
@@ -512,6 +512,23 @@ export default function Chat({ user, keys }: ChatProps) {
     return newRoom;
   };
 
+  const restoreRoomKeyFromPin = async (pin: string) => {
+    if (!activeRoom || !activeRoom.pinSalt) return false;
+    const roomKey = await loadRoomKeyBackup(activeRoom.id, pin, activeRoom.pinSalt);
+    if (!roomKey) return false;
+    setRoomKeys(prev => ({ ...prev, [activeRoom.id]: roomKey }));
+    return true;
+  };
+
+  const cacheRoomKeyForRoom = async (pin: string) => {
+    if (!activeRoom || !activeRoom.pinSalt || !roomKeys[activeRoom.id]) return;
+    try {
+      await saveRoomKeyBackup(activeRoom.id, pin, activeRoom.pinSalt, roomKeys[activeRoom.id]);
+    } catch (err) {
+      console.error('Failed to cache room key locally:', err);
+    }
+  };
+
   const verifyRoomPinForRoom = async (pin: string) => {
     if (!activeRoom) return false;
     if (!activeRoom.pinHash || !activeRoom.pinSalt) {
@@ -519,16 +536,32 @@ export default function Chat({ user, keys }: ChatProps) {
       return true;
     }
 
-    if (verifyRoomPin(pin, activeRoom.pinSalt, activeRoom.pinHash)) {
+    if (!verifyRoomPin(pin, activeRoom.pinSalt, activeRoom.pinHash)) {
+      addRoomPinAttempt(activeRoom.id);
+      const remaining = MAX_PIN_ATTEMPTS - ((roomPinAttempts[activeRoom.id] || 0) + 1);
+      setPinError(remaining > 0 ? `Wrong PIN. ${remaining} attempt(s) left.` : 'Room locked after 3 failed PIN attempts.');
+      return false;
+    }
+
+    let hasRoomKey = Boolean(roomKeys[activeRoom.id]);
+    if (!hasRoomKey) {
+      const restored = await restoreRoomKeyFromPin(pin);
+      if (!restored) {
+        setPinError('Correct PIN, but this room key is not cached locally. Use the original device that unlocked the room or repair room access.');
+        return false;
+      }
+      hasRoomKey = true;
+    }
+
+    if (hasRoomKey) {
+      await cacheRoomKeyForRoom(pin);
       setRoomPinVerified(prev => ({ ...prev, [activeRoom.id]: true }));
       setPinError(null);
       setRoomPinInput('');
       return true;
     }
 
-    addRoomPinAttempt(activeRoom.id);
-    const remaining = MAX_PIN_ATTEMPTS - ((roomPinAttempts[activeRoom.id] || 0) + 1);
-    setPinError(remaining > 0 ? `Wrong PIN. ${remaining} attempt(s) left.` : 'Room locked after 3 failed PIN attempts.');
+    setPinError('Unable to unlock room.');
     return false;
   };
 

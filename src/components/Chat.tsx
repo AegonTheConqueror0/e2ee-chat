@@ -245,7 +245,7 @@ export default function Chat({ user, keys }: ChatProps) {
             }
           } catch (err) {
             console.error('Failed to decrypt room key:', err);
-            toast.error(`Failed to decrypt key for room "${room.id.slice(0, 8)}...". Enter the room PIN to restore local cached access if available.`, {
+            toast.error(`Failed to decrypt key for room "${room.id.slice(0, 8)}...". If you're on another device, restore your identity backup in Setup and reopen the room.`, {
               id: `decrypt-fail-${room.id}`,
             });
           }

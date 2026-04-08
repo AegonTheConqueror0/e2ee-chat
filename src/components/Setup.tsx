@@ -128,10 +128,12 @@ export default function Setup({ onKeysGenerated, user, backupAvailable, existing
             {backupAvailable && existingIdentity ? (
               <div className="rounded-2xl border border-orange-500/30 bg-orange-500/5 p-4 text-sm text-orange-200">
                 This account already has an encrypted identity. Restore your backup to access existing rooms across devices.
+                If you are on a different device, restoring your identity keys here is required before reopening encrypted rooms.
               </div>
             ) : backupAvailable ? (
               <div className="rounded-2xl border border-sky-500/30 bg-sky-500/5 p-4 text-sm text-sky-200">
                 A backup is available for this account. Restore your identity to keep access to existing encrypted rooms.
+                On new devices, use restore instead of relying on local browser cache.
               </div>
             ) : null}
             <AnimatePresence mode="wait">

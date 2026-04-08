@@ -139,15 +139,19 @@ export default function Chat({ user, keys }: ChatProps) {
             
             setRoomKeys(prev => ({ ...prev, [room.id]: decryptedKey }));
             
-            // Decrypt room name
+            // Decrypt room name asynchronously to avoid blocking the UI
             if (room.nameEncrypted) {
               const nonce = room.nameNonce || keyData.nonce;
               if (nonce) {
-                const decryptedName = decryptSymmetric(
-                  { ciphertext: room.nameEncrypted, nonce },
-                  decryptedKey
-                );
-                setRooms(prev => prev.map(r => r.id === room.id ? { ...r, decryptedName } : r));
+                try {
+                  const decryptedName = decryptSymmetric(
+                    { ciphertext: room.nameEncrypted, nonce },
+                    decryptedKey
+                  );
+                  setRooms(prev => prev.map(r => r.id === room.id ? { ...r, decryptedName } : r));
+                } catch (decryptErr) {
+                  console.error('Failed to decrypt room name:', decryptErr);
+                }
               }
             }
           } catch (err) {
@@ -163,7 +167,7 @@ export default function Chat({ user, keys }: ChatProps) {
     });
 
     return () => unsubscribes.forEach(unsub => unsub());
-  }, [rooms, user.uid, keys]);
+  }, [rooms.length, user.uid, keys.exchange.publicKey, keys.exchange.privateKey]);
 
   // --- Message Subscription ---
 
@@ -231,8 +235,14 @@ export default function Chat({ user, keys }: ChatProps) {
       // Encrypt room name with room key
       const encryptedName = encryptSymmetric(newRoomName, roomKey);
       
-      // Create room document
-      await setDoc(doc(db, 'rooms', roomId), {
+      // Encrypt room key for self (anonymous seal)
+      const encryptedRoomKey = sodium.crypto_box_seal(roomKey, keys.exchange.publicKey);
+      
+      // Use batch to ensure both operations succeed or fail together
+      const batch = writeBatch(db);
+      
+      // Add room document
+      batch.set(doc(db, 'rooms', roomId), {
         id: roomId,
         nameEncrypted: encryptedName.ciphertext,
         nameNonce: encryptedName.nonce,
@@ -240,15 +250,15 @@ export default function Chat({ user, keys }: ChatProps) {
         createdAt: serverTimestamp(),
       });
       
-      // Encrypt room key for self (anonymous seal)
-      const encryptedRoomKey = sodium.crypto_box_seal(roomKey, keys.exchange.publicKey);
-      
-      await setDoc(doc(db, 'rooms', roomId, 'keys', user.uid), {
+      // Add key document for self
+      batch.set(doc(db, 'rooms', roomId, 'keys', user.uid), {
         roomId,
         userId: user.uid,
         encryptedKey: toBase64(encryptedRoomKey),
         nonce: encryptedName.nonce, // Use same nonce for room name decryption
       });
+      
+      await batch.commit();
       
       setRoomKeys(prev => ({ ...prev, [roomId]: roomKey }));
       setIsCreatingRoom(false);
@@ -497,7 +507,8 @@ export default function Chat({ user, keys }: ChatProps) {
         const encrypted = encryptSymmetric(uint8Array, roomKey);
         
         // Upload encrypted file
-        const fileRef = ref(storage, `rooms/${activeRoom.id}/files/${Date.now()}_${file.name}.enc`);
+        const fileId = sodium.to_hex(sodium.randombytes_buf(16));
+        const fileRef = ref(storage, `rooms/${activeRoom.id}/files/${fileId}_${file.name}.enc`);
         const blob = new Blob([fromBase64(encrypted.ciphertext)], { type: 'application/octet-stream' });
         
         await uploadBytes(fileRef, blob);

@@ -14,6 +14,8 @@ export default function App() {
   const [keys, setKeys] = useState<IdentityKeys | null>(null);
   const [loading, setLoading] = useState(true);
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [backupAvailable, setBackupAvailable] = useState(false);
+  const [existingIdentity, setExistingIdentity] = useState(false);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
@@ -41,6 +43,12 @@ export default function App() {
         }
 
         const localKeys = await loadKeysLocally();
+        const backupDoc = await getDoc(doc(db, 'backups', firebaseUser.uid));
+        setBackupAvailable(backupDoc.exists());
+
+        const hasKeys = Boolean(userDoc.exists() && userDoc.data()?.publicKeySigning && userDoc.data()?.publicKeyExchange);
+        setExistingIdentity(hasKeys);
+
         if (localKeys) {
           setKeys(localKeys);
           
@@ -104,7 +112,12 @@ export default function App() {
       {!user ? (
         <Auth />
       ) : !keys ? (
-        <Setup onKeysGenerated={handleKeysGenerated} user={user} />
+        <Setup
+          onKeysGenerated={handleKeysGenerated}
+          user={user}
+          backupAvailable={backupAvailable}
+          existingIdentity={existingIdentity}
+        />
       ) : (
         <Chat user={user} keys={keys} />
       )}

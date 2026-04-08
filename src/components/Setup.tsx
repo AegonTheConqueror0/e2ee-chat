@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { generateIdentityKeys, IdentityKeys, backupKeys, restoreKeys, fromBase64 } from '@/lib/crypto';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card';
@@ -12,13 +12,21 @@ import { motion, AnimatePresence } from 'motion/react';
 interface SetupProps {
   onKeysGenerated: (keys: IdentityKeys) => void;
   user: FirebaseUser;
+  backupAvailable: boolean;
+  existingIdentity: boolean;
 }
 
-export default function Setup({ onKeysGenerated, user }: SetupProps) {
+export default function Setup({ onKeysGenerated, user, backupAvailable, existingIdentity }: SetupProps) {
   const [step, setStep] = useState<'initial' | 'generate' | 'backup' | 'restore'>('initial');
   const [passphrase, setPassphrase] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (backupAvailable && existingIdentity && step === 'initial') {
+      setStep('restore');
+    }
+  }, [backupAvailable, existingIdentity, step]);
 
   const handleGenerate = async () => {
     setLoading(true);
@@ -43,12 +51,14 @@ export default function Setup({ onKeysGenerated, user }: SetupProps) {
       const keys = await generateIdentityKeys();
       const backup = await backupKeys(keys, passphrase);
       
-      // Store backup in Firestore
+      // Store backup in Firestore, including public identity keys for restore validation
       await setDoc(doc(db, 'backups', user.uid), {
         userId: user.uid,
         ciphertext: backup.ciphertext,
         nonce: backup.nonce,
         salt: backup.salt,
+        publicSigning: backup.publicSigning,
+        publicExchange: backup.publicExchange,
       });
       
       onKeysGenerated(keys);
@@ -72,18 +82,12 @@ export default function Setup({ onKeysGenerated, user }: SetupProps) {
       }
       
       const userDoc = await getDoc(doc(db, 'users', user.uid));
-      if (!userDoc.exists()) {
-        toast.error('User profile not found.');
-        setLoading(false);
-        return;
-      }
-
       const backupData = backupDoc.data() as any;
-      const userData = userDoc.data() as any;
+      const userData = userDoc.exists() ? (userDoc.data() as any) : {};
       
       const publicKeys = {
-        signing: fromBase64(userData.publicKeySigning),
-        exchange: fromBase64(userData.publicKeyExchange),
+        signing: userData.publicKeySigning ? fromBase64(userData.publicKeySigning) : (backupData.publicSigning ? fromBase64(backupData.publicSigning) : undefined),
+        exchange: userData.publicKeyExchange ? fromBase64(userData.publicKeyExchange) : (backupData.publicExchange ? fromBase64(backupData.publicExchange) : undefined),
       };
 
       const keys = await restoreKeys(backupData, passphrase, publicKeys);
@@ -121,6 +125,15 @@ export default function Setup({ onKeysGenerated, user }: SetupProps) {
           </CardHeader>
 
           <CardContent className="space-y-4 py-6">
+            {backupAvailable && existingIdentity ? (
+              <div className="rounded-2xl border border-orange-500/30 bg-orange-500/5 p-4 text-sm text-orange-200">
+                This account already has an encrypted identity. Restore your backup to access existing rooms across devices.
+              </div>
+            ) : backupAvailable ? (
+              <div className="rounded-2xl border border-sky-500/30 bg-sky-500/5 p-4 text-sm text-sky-200">
+                A backup is available for this account. Restore your identity to keep access to existing encrypted rooms.
+              </div>
+            ) : null}
             <AnimatePresence mode="wait">
               {step === 'initial' && (
                 <motion.div

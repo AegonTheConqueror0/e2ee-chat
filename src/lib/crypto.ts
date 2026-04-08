@@ -208,7 +208,7 @@ export async function deriveKeyFromPassphrase(passphrase: string, salt: Uint8Arr
   );
 }
 
-export async function backupKeys(keys: IdentityKeys, passphrase: string): Promise<EncryptedData & { salt: string }> {
+export async function backupKeys(keys: IdentityKeys, passphrase: string): Promise<EncryptedData & { salt: string; publicSigning: string; publicExchange: string }> {
   await initSodium();
   const salt = sodium.randombytes_buf(16);
   const backupKey = await deriveKeyFromPassphrase(passphrase, salt);
@@ -223,24 +223,33 @@ export async function backupKeys(keys: IdentityKeys, passphrase: string): Promis
   return {
     ...encrypted,
     salt: sodium.to_base64(salt),
+    publicSigning: sodium.to_base64(keys.signing.publicKey),
+    publicExchange: sodium.to_base64(keys.exchange.publicKey),
   };
 }
 
-export async function restoreKeys(backup: EncryptedData & { salt: string }, passphrase: string, publicKeys: { signing: Uint8Array, exchange: Uint8Array }): Promise<IdentityKeys> {
+export async function restoreKeys(backup: EncryptedData & { salt: string; publicSigning?: string; publicExchange?: string }, passphrase: string, publicKeys: { signing?: Uint8Array, exchange?: Uint8Array } = {}): Promise<IdentityKeys> {
   await initSodium();
   const salt = sodium.from_base64(backup.salt);
   const backupKey = await deriveKeyFromPassphrase(passphrase, salt);
   
   const decrypted = decryptSymmetric(backup, backupKey);
   const parsed = JSON.parse(decrypted);
+
+  const signingPublic = publicKeys.signing || (backup.publicSigning ? sodium.from_base64(backup.publicSigning) : undefined);
+  const exchangePublic = publicKeys.exchange || (backup.publicExchange ? sodium.from_base64(backup.publicExchange) : undefined);
+
+  if (!signingPublic || !exchangePublic) {
+    throw new Error('Missing public keys for restore. Please make sure your backup is valid and the user profile contains public identity keys.');
+  }
   
   return {
     signing: {
-      publicKey: publicKeys.signing,
+      publicKey: signingPublic,
       privateKey: sodium.from_base64(parsed.signing),
     },
     exchange: {
-      publicKey: publicKeys.exchange,
+      publicKey: exchangePublic,
       privateKey: sodium.from_base64(parsed.exchange),
     },
   };

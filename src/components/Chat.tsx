@@ -840,18 +840,19 @@ export default function Chat({ user, keys }: ChatProps) {
         getDocs(collection(db, 'rooms', activeRoom.id, 'keys')),
       ]);
 
-      const deleteRefs = [
+      const allDeleteRefs = [
         ...messagesSnapshot.docs.map(docSnap => docSnap.ref),
         ...keysSnapshot.docs.map(docSnap => docSnap.ref),
-        roomRef,
       ];
 
       const chunkSize = 500;
-      for (let i = 0; i < deleteRefs.length; i += chunkSize) {
+      for (let i = 0; i < allDeleteRefs.length; i += chunkSize) {
         const batch = writeBatch(db);
-        deleteRefs.slice(i, i + chunkSize).forEach(refToDelete => batch.delete(refToDelete));
+        allDeleteRefs.slice(i, i + chunkSize).forEach(refToDelete => batch.delete(refToDelete));
         await batch.commit();
       }
+
+      await deleteDoc(roomRef);
 
       try {
         const filesRef = ref(storage, `rooms/${activeRoom.id}/files`);
@@ -861,11 +862,22 @@ export default function Chat({ user, keys }: ChatProps) {
         console.warn('Unable to delete associated room storage files:', storageError);
       }
 
+      setRoomKeys(prev => {
+        const updated = { ...prev };
+        delete updated[activeRoom.id];
+        return updated;
+      });
+      setRoomPinVerified(prev => {
+        const updated = { ...prev };
+        delete updated[activeRoom.id];
+        return updated;
+      });
       setActiveRoom(null);
       setShowMobileSidebar(true);
       toast.success('Room deleted successfully.');
     } catch (err) {
       toast.error('Failed to delete room.');
+      console.error('Delete room error:', err);
       handleFirestoreError(err, OperationType.DELETE, `rooms/${activeRoom?.id}`);
     } finally {
       setLoading(false);
@@ -1097,14 +1109,10 @@ export default function Chat({ user, keys }: ChatProps) {
     const otherMembers = activeRoom.members.filter(id => id !== user.uid);
     if (otherMembers.length === 0) return 'Seen';
 
-    const deliveredTo = msg.deliveredTo || [];
     const seenBy = msg.seenBy || [];
-    const allDelivered = otherMembers.every(id => deliveredTo.includes(id));
     const allSeen = otherMembers.every(id => seenBy.includes(id));
 
-    if (allSeen) return 'Seen';
-    if (allDelivered) return 'Delivered';
-    return 'Sent';
+    return allSeen ? 'Seen' : 'Sent';
   };
 
   const SidebarContent = () => (

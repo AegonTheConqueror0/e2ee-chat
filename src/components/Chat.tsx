@@ -299,17 +299,25 @@ export default function Chat({ user, keys }: ChatProps) {
         }
       }
       
-      // Auto-scroll to bottom only if user is already at bottom or if this is initial load
-      if (shouldAutoScroll) {
-        setTimeout(() => {
-          if (messagesScrollAreaRef.current) {
-            const viewport = messagesScrollAreaRef.current.querySelector('[data-slot="scroll-area-viewport"]') as HTMLElement;
-            if (viewport) {
+      // Check if user is at bottom before auto-scrolling
+      setTimeout(() => {
+        if (messagesScrollAreaRef.current) {
+          const viewport = messagesScrollAreaRef.current.querySelector('[data-slot="scroll-area-viewport"]') as HTMLElement;
+          if (viewport) {
+            const { scrollTop, scrollHeight, clientHeight } = viewport;
+            const isAtBottom = scrollTop + clientHeight >= scrollHeight - 10;
+            
+            // Only auto-scroll if user is at bottom OR if shouldAutoScroll is explicitly set (for sending messages)
+            if (isAtBottom || shouldAutoScroll) {
               viewport.scrollTop = viewport.scrollHeight;
+              // Reset shouldAutoScroll after using it
+              if (shouldAutoScroll) {
+                setShouldAutoScroll(false);
+              }
             }
           }
-        }, 100);
-      }
+        }
+      }, 100);
     });
 
     return () => unsubscribe();
@@ -327,7 +335,7 @@ export default function Chat({ user, keys }: ChatProps) {
       const { scrollTop, scrollHeight, clientHeight } = viewport;
       const isAtBottom = scrollTop + clientHeight >= scrollHeight - 10; // 10px tolerance
       setIsUserAtBottom(isAtBottom);
-      setShouldAutoScroll(isAtBottom);
+      // Note: shouldAutoScroll is only set to true when sending messages
     };
 
     viewport.addEventListener('scroll', handleScroll, { passive: true });
@@ -343,7 +351,7 @@ export default function Chat({ user, keys }: ChatProps) {
   useEffect(() => {
     if (activeRoom) {
       setShowMobileSidebar(false);
-      // Reset scroll state when entering a room
+      // Reset scroll state when entering a room - allow initial scroll to bottom
       setIsUserAtBottom(true);
       setShouldAutoScroll(true);
     }

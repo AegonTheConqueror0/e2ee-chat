@@ -422,11 +422,63 @@ export default function Chat({ user, keys }: ChatProps) {
     }
   };
 
+  const createPrivateRoom = async (targetUser: any, roomNameOverride?: string) => {
+    const roomId = sodium.to_hex(sodium.randombytes_buf(16));
+    const roomKey = generateRoomKey();
+    const roomName = roomNameOverride || targetUser.email || 'Private Chat';
+    const encryptedName = encryptSymmetric(roomName, roomKey);
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'rooms', roomId), {
+      id: roomId,
+      nameEncrypted: encryptedName.ciphertext,
+      nameNonce: encryptedName.nonce,
+      members: [user.uid, targetUser.id],
+      createdAt: serverTimestamp(),
+      isPrivate: true,
+    });
+
+    const myEncryptedRoomKey = sodium.crypto_box_seal(roomKey, keys.exchange.publicKey);
+    batch.set(doc(db, 'rooms', roomId, 'keys', user.uid), {
+      roomId,
+      userId: user.uid,
+      encryptedKey: toBase64(myEncryptedRoomKey),
+      nonce: encryptedName.nonce,
+    });
+
+    if (!targetUser.publicKeyExchange) {
+      throw new Error('Target user has no exchange key');
+    }
+
+    const targetExchangeKey = fromBase64(targetUser.publicKeyExchange);
+    const targetEncryptedRoomKey = sodium.crypto_box_seal(roomKey, targetExchangeKey);
+    batch.set(doc(db, 'rooms', roomId, 'keys', targetUser.id), {
+      roomId,
+      userId: targetUser.id,
+      encryptedKey: toBase64(targetEncryptedRoomKey),
+      nonce: encryptedName.nonce,
+    });
+
+    await batch.commit();
+    const newRoom: Room = {
+      id: roomId,
+      nameEncrypted: encryptedName.ciphertext,
+      nameNonce: encryptedName.nonce,
+      members: [user.uid, targetUser.id],
+      createdAt: new Date(),
+      decryptedName: roomName,
+      isPrivate: true,
+    };
+
+    setRoomKeys(prev => ({ ...prev, [roomId]: roomKey }));
+    setActiveRoom(newRoom);
+    return newRoom;
+  };
+
   const startPrivateChat = async (targetUser: any) => {
     if (!isSodiumReady || loading) return;
     setLoading(true);
     try {
-      // Check if a 1-on-1 room already exists
       const q = query(
         collection(db, 'rooms'),
         where('members', 'array-contains', user.uid)
@@ -438,63 +490,35 @@ export default function Chat({ user, keys }: ChatProps) {
       });
 
       if (existingRoom) {
-        setActiveRoom({ id: existingRoom.id, ...existingRoom.data() } as Room);
+        const roomData = existingRoom.data() as Room;
+        const keyDoc = await getDoc(doc(db, 'rooms', existingRoom.id, 'keys', user.uid));
+        let canAccessExisting = false;
+
+        if (keyDoc.exists()) {
+          try {
+            const keyData = keyDoc.data();
+            const encryptedKey = fromBase64(keyData.encryptedKey);
+            sodium.crypto_box_seal_open(encryptedKey, keys.exchange.publicKey, keys.exchange.privateKey);
+            canAccessExisting = true;
+          } catch (err) {
+            canAccessExisting = false;
+          }
+        }
+
+        if (canAccessExisting) {
+          setActiveRoom({ id: existingRoom.id, ...roomData } as Room);
+          setLoading(false);
+          return;
+        }
+
+        // If existing room is not decryptable, create a fresh room so both users can chat.
+        await createPrivateRoom(targetUser, targetUser.email || 'Private Chat');
+        toast.success('Opened a new secure chat for this conversation.');
         setLoading(false);
         return;
       }
 
-      // Create new private room
-      const roomId = sodium.to_hex(sodium.randombytes_buf(16));
-      const roomKey = generateRoomKey();
-      
-      // Encrypt room name (target user's email) with room key
-      const roomName = targetUser.email || 'Private Chat';
-      const encryptedName = encryptSymmetric(roomName, roomKey);
-      
-      const batch = writeBatch(db);
-      
-      // Create room document
-      batch.set(doc(db, 'rooms', roomId), {
-        id: roomId,
-        nameEncrypted: encryptedName.ciphertext,
-        nameNonce: encryptedName.nonce,
-        members: [user.uid, targetUser.id],
-        createdAt: serverTimestamp(),
-        isPrivate: true,
-      });
-      
-      // Encrypt room key for self
-      const myEncryptedRoomKey = sodium.crypto_box_seal(roomKey, keys.exchange.publicKey);
-      batch.set(doc(db, 'rooms', roomId, 'keys', user.uid), {
-        roomId,
-        userId: user.uid,
-        encryptedKey: toBase64(myEncryptedRoomKey),
-        nonce: encryptedName.nonce,
-      });
-      
-      // Encrypt room key for target user
-      if (!targetUser.publicKeyExchange) {
-        throw new Error('Target user has no exchange key');
-      }
-      const targetExchangeKey = fromBase64(targetUser.publicKeyExchange);
-      const targetEncryptedRoomKey = sodium.crypto_box_seal(roomKey, targetExchangeKey);
-      batch.set(doc(db, 'rooms', roomId, 'keys', targetUser.id), {
-        roomId,
-        userId: targetUser.id,
-        encryptedKey: toBase64(targetEncryptedRoomKey),
-        nonce: encryptedName.nonce,
-      });
-      
-      await batch.commit();
-      
-      setRoomKeys(prev => ({ ...prev, [roomId]: roomKey }));
-      setActiveRoom({ 
-        id: roomId, 
-        nameEncrypted: encryptedName.ciphertext, 
-        members: [user.uid, targetUser.id],
-        createdAt: new Date(),
-        decryptedName: roomName
-      });
+      await createPrivateRoom(targetUser);
       toast.success('Private chat started.');
     } catch (err: any) {
       console.error('Start private chat error:', err);
@@ -897,6 +921,69 @@ export default function Chat({ user, keys }: ChatProps) {
       setLoading(false);
     }
   };
+
+  const ensureRoomKeysDistributed = async (room: Room, roomKey: Uint8Array) => {
+    try {
+      const memberDocs = await Promise.all(
+        room.members.map(memberId => getDoc(doc(db, 'users', memberId)))
+      );
+
+      const batch = writeBatch(db);
+      let hasUpdate = false;
+
+      for (let i = 0; i < room.members.length; i += 1) {
+        const memberId = room.members[i];
+        const userDoc = memberDocs[i];
+        if (!userDoc.exists()) continue;
+
+        const userData = userDoc.data();
+        if (!userData.publicKeyExchange) continue;
+
+        const targetExchangeKey = fromBase64(userData.publicKeyExchange);
+        const encryptedRoomKey = sodium.crypto_box_seal(roomKey, targetExchangeKey);
+        const keyRef = doc(db, 'rooms', room.id, 'keys', memberId);
+
+        batch.set(keyRef, {
+          roomId: room.id,
+          userId: memberId,
+          encryptedKey: toBase64(encryptedRoomKey),
+          nonce: room.nameNonce || '',
+          repairedAt: serverTimestamp(),
+        }, { merge: true });
+
+        hasUpdate = true;
+      }
+
+      if (hasUpdate) {
+        await batch.commit();
+      }
+    } catch (err) {
+      console.error('Automatic room key distribution failed:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (!activeRoom || !roomKeys[activeRoom.id] || loading) return;
+
+    let isCancelled = false;
+    const syncKeys = async () => {
+      const roomKey = roomKeys[activeRoom.id];
+      if (!roomKey) return;
+
+      try {
+        await ensureRoomKeysDistributed(activeRoom, roomKey);
+      } catch (err) {
+        if (!isCancelled) {
+          console.error('Error auto repairing room keys:', err);
+        }
+      }
+    };
+
+    syncKeys();
+    return () => {
+      isCancelled = true;
+    };
+  }, [activeRoom?.id, roomKeys, loading]);
 
   // --- Render ---
 

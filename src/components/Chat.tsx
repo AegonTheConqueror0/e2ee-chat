@@ -990,7 +990,7 @@ export default function Chat({ user, keys }: ChatProps) {
         </div>
 
         <TabsContent value="rooms" className="flex-1 flex flex-col m-0">
-          <ScrollArea className="flex-1 px-2">
+          <ScrollArea className="flex-1 h-0 px-2">
             <div className="space-y-1 p-2">
               {rooms.map((room) => (
                 <button
@@ -1032,7 +1032,7 @@ export default function Chat({ user, keys }: ChatProps) {
             </div>
           </div>
 
-          <ScrollArea className="flex-1 px-2">
+          <ScrollArea className="flex-1 h-0 px-2">
             <div className="space-y-1 p-2">
               {allUsers
                 .filter(u => u.uid !== user.uid && (u.email?.includes(userSearchQuery) || u.uid.includes(userSearchQuery)))
@@ -1095,7 +1095,7 @@ export default function Chat({ user, keys }: ChatProps) {
       </AnimatePresence>
 
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col bg-zinc-950 min-w-0 relative">
+      <div className="flex-1 flex flex-col bg-zinc-950 min-w-0 min-h-0 relative">
         {activeRoom ? (
           <>
             {/* Chat Header */}
@@ -1292,8 +1292,8 @@ export default function Chat({ user, keys }: ChatProps) {
             </div>
 
             {/* Messages Area */}
-            <ScrollArea className="flex-1 p-2 sm:p-3 md:p-8">
-              <div className="max-w-4xl mx-auto space-y-3 sm:space-y-4 md:space-y-8">
+            <ScrollArea className="flex-1 h-0 p-2 sm:p-3 md:p-8 overscroll-contain touch-pan-y">
+              <div className="max-w-4xl mx-auto space-y-3 sm:space-y-4 md:space-y-8 pb-4">
                 {messages.map((msg, i) => {
                   const isMine = msg.senderId === user.uid;
                   const prevMsg = messages[i - 1];

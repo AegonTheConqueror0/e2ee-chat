@@ -84,6 +84,27 @@ export async function clearKeysLocally() {
   await del(KEYS_STORE_NAME);
 }
 
+export function hashRoomPin(pin: string, salt?: Uint8Array) {
+  const normalized = pin.trim();
+  if (!/^[0-9]{4}$/.test(normalized)) {
+    throw new Error('Room PIN must be exactly 4 digits.');
+  }
+  const pinSalt = salt || sodium.randombytes_buf(16);
+  const hashBytes = sodium.crypto_generichash(32, sodium.from_string(normalized), pinSalt);
+  return {
+    pinHash: sodium.to_base64(hashBytes),
+    pinSalt: sodium.to_base64(pinSalt),
+  };
+}
+
+export function verifyRoomPin(pin: string, pinSaltBase64: string, expectedHash: string) {
+  const normalized = pin.trim();
+  if (!/^[0-9]{4}$/.test(normalized)) return false;
+  const pinSalt = sodium.from_base64(pinSaltBase64);
+  const verifyHash = sodium.crypto_generichash(32, sodium.from_string(normalized), pinSalt);
+  return sodium.to_base64(verifyHash) === expectedHash;
+}
+
 // --- Base64 Helpers ---
 
 export function toBase64(data: Uint8Array): string {

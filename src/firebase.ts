@@ -1,5 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, User as FirebaseUser, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, User as FirebaseUser, signInWithEmailAndPassword, createUserWithEmailAndPassword, fetchSignInMethodsForEmail, linkWithCredential, EmailAuthProvider, AuthCredential } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, getDoc, getDocs, query, where, onSnapshot, addDoc, serverTimestamp, Timestamp, orderBy, limit, updateDoc, arrayUnion, writeBatch, deleteDoc } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
@@ -13,12 +13,23 @@ export const googleProvider = new GoogleAuthProvider();
 
 // --- Auth Utils ---
 
-export async function signIn() {
+export async function signInWithGoogle() {
   try {
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Sign in error:', error);
+    if (error.code === 'auth/account-exists-with-different-credential') {
+      const email = error.customData?.email;
+      const pendingCredential = GoogleAuthProvider.credentialFromError(error);
+      const methods = email ? await fetchSignInMethodsForEmail(auth, email) : [];
+      const customError: any = new Error('Account exists with a different sign-in method. Sign in with email/password to link Google.');
+      customError.code = error.code;
+      customError.email = email;
+      customError.pendingCredential = pendingCredential;
+      customError.methods = methods;
+      throw customError;
+    }
     throw error;
   }
 }
@@ -39,6 +50,19 @@ export async function signUpEmail(email: string, pass: string) {
     return result.user;
   } catch (error) {
     console.error('Email sign up error:', error);
+    throw error;
+  }
+}
+
+export async function linkWithGoogleCredential(credential: AuthCredential) {
+  if (!auth.currentUser) {
+    throw new Error('No authenticated user available to link credentials.');
+  }
+  try {
+    await linkWithCredential(auth.currentUser, credential);
+    return auth.currentUser;
+  } catch (error) {
+    console.error('Credential linking failed:', error);
     throw error;
   }
 }

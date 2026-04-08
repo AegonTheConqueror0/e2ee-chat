@@ -1,7 +1,8 @@
-import { signIn, signInEmail, signUpEmail } from '@/firebase';
+import { auth, signInWithGoogle, signInEmail, signUpEmail, linkWithGoogleCredential } from '@/firebase';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
+import { toast } from 'sonner';
 import { Shield, Lock, Key, MessageSquare, Mail, Lock as LockIcon, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import React, { useState } from 'react';
@@ -12,13 +13,17 @@ export default function Auth() {
   const [isSignUp, setIsSignUp] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingGoogleCredential, setPendingGoogleCredential] = useState<any>(null);
+  const [pendingGoogleEmail, setPendingGoogleEmail] = useState<string | null>(null);
 
   const handleGoogleSignIn = async () => {
     if (loading) return;
     setLoading(true);
     setError(null);
+    setPendingGoogleCredential(null);
+    setPendingGoogleEmail(null);
     try {
-      await signIn();
+      await signInWithGoogle();
     } catch (err: any) {
       console.error('Sign in failed:', err);
       if (err.code === 'auth/popup-closed-by-user') {
@@ -29,6 +34,10 @@ export default function Auth() {
         setError(`Domain not authorized. Please add "${window.location.hostname}" to Authorized Domains in Firebase Console.`);
       } else if (err.code === 'auth/operation-not-allowed') {
         setError('Google Sign-In is not enabled in your Firebase Console.');
+      } else if (err.code === 'auth/account-exists-with-different-credential') {
+        setPendingGoogleCredential(err.pendingCredential);
+        setPendingGoogleEmail(err.email || null);
+        setError('An account already exists with this email. Please sign in with email/password to link Google.');
       } else {
         setError(err.message || 'Google sign in failed.');
       }
@@ -49,14 +58,19 @@ export default function Auth() {
       } else {
         await signInEmail(email, password);
       }
+
+      if (pendingGoogleCredential && auth.currentUser && auth.currentUser.email?.toLowerCase() === pendingGoogleEmail?.toLowerCase()) {
+        await linkWithGoogleCredential(pendingGoogleCredential);
+        setPendingGoogleCredential(null);
+        setPendingGoogleEmail(null);
+        toast.success('Google account linked to your email login.');
+      }
     } catch (err: any) {
       console.error('Email auth failed:', err);
       if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
         setError('Password or Email incorrect');
       } else if (err.code === 'auth/email-already-in-use') {
-        setError('Email already in use.');
-      } else if (err.code === 'auth/weak-password') {
-        setError('Password should be at least 6 characters.');
+        setError('Email already in use. Try signing in with Google or use the existing email account.');
       } else if (err.code === 'auth/operation-not-allowed') {
         setError('Email/Password auth is DISABLED. Please enable it in Firebase Console > Authentication > Sign-in method.');
       } else {

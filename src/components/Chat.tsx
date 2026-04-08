@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { User as FirebaseUser } from 'firebase/auth';
-import { IdentityKeys, encryptSymmetric, decryptSymmetric, decryptSymmetricBytes, generateRoomKey, signData, verifySignature, encryptAsymmetric, decryptAsymmetric, toBase64, fromBase64 } from '@/lib/crypto';
+import { IdentityKeys, encryptSymmetric, decryptSymmetric, decryptSymmetricBytes, generateRoomKey, signData, verifySignature, encryptAsymmetric, decryptAsymmetric, hashRoomPin, verifyRoomPin, toBase64, fromBase64 } from '@/lib/crypto';
 import { db, collection, query, where, onSnapshot, orderBy, addDoc, serverTimestamp, doc, getDoc, setDoc, getDocs, storage, auth, handleFirestoreError, OperationType, updateDoc, arrayUnion, limit, writeBatch, deleteDoc } from '@/firebase';
 import { ref, uploadBytes, getDownloadURL, listAll, deleteObject } from 'firebase/storage';
 import { Button } from '@/components/ui/button';
@@ -31,6 +31,8 @@ interface Room {
   createdAt: any;
   decryptedName?: string;
   isPrivate?: boolean;
+  pinHash?: string;
+  pinSalt?: string;
 }
 
 interface Message {
@@ -71,8 +73,14 @@ export default function Chat({ user, keys }: ChatProps) {
   }, [user.uid]);
   const [isCreatingRoom, setIsCreatingRoom] = useState(false);
   const [newRoomName, setNewRoomName] = useState('');
+  const [newRoomPin, setNewRoomPin] = useState('');
+  const [pinError, setPinError] = useState<string | null>(null);
+  const [roomPinInput, setRoomPinInput] = useState('');
+  const [roomPinVerified, setRoomPinVerified] = useState<Record<string, boolean>>({});
+  const [roomPinAttempts, setRoomPinAttempts] = useState<Record<string, number>>({});
   const [isSodiumReady, setIsSodiumReady] = useState(false);
   const [showMobileSidebar, setShowMobileSidebar] = useState(true);
+  const MAX_PIN_ATTEMPTS = 3;
   const [userStatusMap, setUserStatusMap] = useState<Record<string, { lastActive: number; status: 'online' | 'away' | 'inactive'; currentRoomId?: string }>>({});
   
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -171,6 +179,15 @@ export default function Chat({ user, keys }: ChatProps) {
     updateCurrentRoom();
   }, [activeRoom?.id, user.uid]);
 
+  useEffect(() => {
+    if (!activeRoom) return;
+    setRoomPinInput('');
+    setPinError(null);
+    if (!activeRoom.pinHash) {
+      setRoomPinVerified(prev => ({ ...prev, [activeRoom.id]: true }));
+    }
+  }, [activeRoom?.id, activeRoom?.pinHash]);
+
   // --- Room Subscription ---
 
   useEffect(() => {
@@ -244,7 +261,7 @@ export default function Chat({ user, keys }: ChatProps) {
   // --- Message Subscription ---
 
   useEffect(() => {
-    if (!activeRoom || !roomKeys[activeRoom.id]) {
+    if (!activeRoom || !roomKeys[activeRoom.id] || (activeRoom.pinHash && !roomPinVerified[activeRoom.id])) {
       setMessages([]);
       return;
     }
@@ -376,11 +393,19 @@ export default function Chat({ user, keys }: ChatProps) {
   // --- Actions ---
 
   const handleCreateRoom = async () => {
-    if (!newRoomName || !isSodiumReady) return;
+    if (!newRoomName || !newRoomPin || !isSodiumReady) {
+      setPinError('Room name and 4-digit PIN are required.');
+      return;
+    }
+    if (!/^[0-9]{4}$/.test(newRoomPin)) {
+      setPinError('PIN must be exactly 4 digits.');
+      return;
+    }
     setLoading(true);
     try {
       const roomId = sodium.to_hex(sodium.randombytes_buf(16));
       const roomKey = generateRoomKey();
+      const { pinHash, pinSalt } = hashRoomPin(newRoomPin);
       
       // Encrypt room name with room key
       const encryptedName = encryptSymmetric(newRoomName, roomKey);
@@ -398,6 +423,8 @@ export default function Chat({ user, keys }: ChatProps) {
         nameNonce: encryptedName.nonce,
         members: [user.uid],
         createdAt: serverTimestamp(),
+        pinHash,
+        pinSalt,
       });
       
       // Add key document for self
@@ -413,6 +440,8 @@ export default function Chat({ user, keys }: ChatProps) {
       setRoomKeys(prev => ({ ...prev, [roomId]: roomKey }));
       setIsCreatingRoom(false);
       setNewRoomName('');
+      setNewRoomPin('');
+      setPinError(null);
       toast.success('Room created.');
     } catch (err) {
       toast.error('Failed to create room.');
@@ -422,9 +451,14 @@ export default function Chat({ user, keys }: ChatProps) {
     }
   };
 
-  const createPrivateRoom = async (targetUser: any, roomNameOverride?: string) => {
+  const createPrivateRoom = async (targetUser: any, roomNameOverride?: string, pin?: string) => {
+    if (!pin || !/^[0-9]{4}$/.test(pin)) {
+      throw new Error('A valid 4-digit PIN is required for private chats.');
+    }
+
     const roomId = sodium.to_hex(sodium.randombytes_buf(16));
     const roomKey = generateRoomKey();
+    const { pinHash, pinSalt } = hashRoomPin(pin);
     const roomName = roomNameOverride || targetUser.email || 'Private Chat';
     const encryptedName = encryptSymmetric(roomName, roomKey);
 
@@ -436,6 +470,8 @@ export default function Chat({ user, keys }: ChatProps) {
       members: [user.uid, targetUser.id],
       createdAt: serverTimestamp(),
       isPrivate: true,
+      pinHash,
+      pinSalt,
     });
 
     const myEncryptedRoomKey = sodium.crypto_box_seal(roomKey, keys.exchange.publicKey);
@@ -471,8 +507,36 @@ export default function Chat({ user, keys }: ChatProps) {
     };
 
     setRoomKeys(prev => ({ ...prev, [roomId]: roomKey }));
+    setRoomPinVerified(prev => ({ ...prev, [roomId]: true }));
     setActiveRoom(newRoom);
     return newRoom;
+  };
+
+  const verifyRoomPinForRoom = async (pin: string) => {
+    if (!activeRoom) return false;
+    if (!activeRoom.pinHash || !activeRoom.pinSalt) {
+      setRoomPinVerified(prev => ({ ...prev, [activeRoom.id]: true }));
+      return true;
+    }
+
+    if (verifyRoomPin(pin, activeRoom.pinSalt, activeRoom.pinHash)) {
+      setRoomPinVerified(prev => ({ ...prev, [activeRoom.id]: true }));
+      setPinError(null);
+      setRoomPinInput('');
+      return true;
+    }
+
+    addRoomPinAttempt(activeRoom.id);
+    const remaining = MAX_PIN_ATTEMPTS - ((roomPinAttempts[activeRoom.id] || 0) + 1);
+    setPinError(remaining > 0 ? `Wrong PIN. ${remaining} attempt(s) left.` : 'Room locked after 3 failed PIN attempts.');
+    return false;
+  };
+
+  const addRoomPinAttempt = (roomId: string) => {
+    setRoomPinAttempts(prev => ({
+      ...prev,
+      [roomId]: (prev[roomId] || 0) + 1,
+    }));
   };
 
   const startPrivateChat = async (targetUser: any) => {
@@ -505,21 +569,27 @@ export default function Chat({ user, keys }: ChatProps) {
           }
         }
 
+        setActiveRoom({ ...roomData, id: existingRoom.id } as Room);
         if (canAccessExisting) {
-          setActiveRoom({ id: existingRoom.id, ...roomData } as Room);
           setLoading(false);
           return;
         }
 
-        // If existing room is not decryptable, create a fresh room so both users can chat.
-        await createPrivateRoom(targetUser, targetUser.email || 'Private Chat');
-        toast.success('Opened a new secure chat for this conversation.');
+        // Existing room may be protected by PIN or old key mismatch.
+        toast('Existing chat found. Enter the room PIN to continue.');
         setLoading(false);
         return;
       }
 
-      await createPrivateRoom(targetUser);
-      toast.success('Private chat started.');
+      const newPin = window.prompt('Enter a 4-digit PIN for this private chat:');
+      if (!newPin || !/^[0-9]{4}$/.test(newPin)) {
+        toast.error('A valid 4-digit PIN is required to start a private chat.');
+        setLoading(false);
+        return;
+      }
+
+      await createPrivateRoom(targetUser, undefined, newPin);
+      toast.success('Private chat started. Share the PIN with the other user.');
     } catch (err: any) {
       console.error('Start private chat error:', err);
       if (err.message?.includes('no exchange key')) {
@@ -563,7 +633,7 @@ export default function Chat({ user, keys }: ChatProps) {
   };
 
   const handleSendLocation = async () => {
-    if (!activeRoom || !roomKeys[activeRoom.id]) {
+    if (!activeRoom || !roomKeys[activeRoom.id] || (activeRoom.pinHash && !roomPinVerified[activeRoom.id])) {
       toast.error('Secure room not ready.');
       return;
     }
@@ -620,7 +690,7 @@ export default function Chat({ user, keys }: ChatProps) {
   };
 
   const handleDownloadEncryptedFile = async (fileData: any) => {
-    if (!activeRoom || !roomKeys[activeRoom.id]) {
+    if (!activeRoom || !roomKeys[activeRoom.id] || (activeRoom.pinHash && !roomPinVerified[activeRoom.id])) {
       toast.error('Secure room not ready.');
       return;
     }
@@ -632,7 +702,7 @@ export default function Chat({ user, keys }: ChatProps) {
       const encryptedArrayBuffer = await response.arrayBuffer();
       const encryptedBytes = new Uint8Array(encryptedArrayBuffer);
       const decryptedBytes = decryptSymmetricBytes({ ciphertext: sodium.to_base64(encryptedBytes), nonce: fileData.nonce }, roomKeys[activeRoom.id]);
-      const blob = new Blob([decryptedBytes], { type: fileData.mimeType || 'application/octet-stream' });
+      const blob = new Blob([new Uint8Array(decryptedBytes)], { type: fileData.mimeType || 'application/octet-stream' });
       const objectUrl = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = objectUrl;
@@ -804,7 +874,7 @@ export default function Chat({ user, keys }: ChatProps) {
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !activeRoom || !roomKeys[activeRoom.id]) return;
+    if (!file || !activeRoom || !roomKeys[activeRoom.id] || (activeRoom.pinHash && !roomPinVerified[activeRoom.id])) return;
     if (fileInputRef.current) fileInputRef.current.value = '';
     
     setLoading(true);
@@ -823,7 +893,7 @@ export default function Chat({ user, keys }: ChatProps) {
         // Upload encrypted file
         const fileId = sodium.to_hex(sodium.randombytes_buf(16));
         const fileRef = ref(storage, `rooms/${activeRoom.id}/files/${fileId}_${file.name}.enc`);
-        const blob = new Blob([fromBase64(encrypted.ciphertext)], { type: 'application/octet-stream' });
+        const blob = new Blob([new Uint8Array(fromBase64(encrypted.ciphertext))], { type: 'application/octet-stream' });
         
         await uploadBytes(fileRef, blob);
         const url = await getDownloadURL(fileRef);
@@ -1414,7 +1484,7 @@ export default function Chat({ user, keys }: ChatProps) {
                                     <div className={`absolute bottom-0 right-0 w-2 h-2 rounded-full border border-zinc-950 ${getStatusColor(memberStatus)}`} />
                                   </div>
                                   <div className="overflow-hidden flex-1">
-                                    <p className="text-xs font-semibold text-zinc-100 truncate">{memberData?.email || m.slice(0, 12)}</p>
+                                    <p className="text-xs font-semibold text-zinc-100 truncate">{m === user.uid ? 'You' : 'Anonymous'}</p>
                                     <p className="text-[10px] text-zinc-500">{memberPresence}</p>
                                   </div>
                                 </div>
@@ -1459,6 +1529,44 @@ export default function Chat({ user, keys }: ChatProps) {
               </div>
             </div>
 
+            {activeRoom.pinHash && !roomPinVerified[activeRoom.id] ? (
+              <div className="p-6 mx-4 mt-4 rounded-3xl border border-red-500 bg-red-500/10 text-red-200 text-center">
+                <p className="text-sm font-semibold">Room PIN required</p>
+                <p className="text-xs text-red-300 mt-2 mb-4">Enter the 4-digit PIN to unlock this encrypted room. Messages will remain hidden until the correct code is entered.</p>
+                <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                  <Input
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={4}
+                    value={roomPinInput}
+                    onChange={(e) => setRoomPinInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))}
+                    placeholder="PIN"
+                    className="w-full max-w-[140px] bg-zinc-900 border-zinc-800 text-zinc-100"
+                  />
+                  <Button
+                    onClick={async () => {
+                      if (!roomPinInput || roomPinInput.length !== 4) {
+                        setPinError('Enter a valid 4-digit PIN.');
+                        return;
+                      }
+                      const success = await verifyRoomPinForRoom(roomPinInput);
+                      if (success) {
+                        toast.success('Room unlocked.');
+                      }
+                    }}
+                    disabled={loading || roomPinAttempts[activeRoom.id] >= MAX_PIN_ATTEMPTS}
+                    className="bg-zinc-100 text-zinc-950 hover:bg-zinc-200"
+                  >
+                    Unlock
+                  </Button>
+                </div>
+                {pinError ? <p className="mt-2 text-[11px] text-red-300">{pinError}</p> : null}
+                {roomPinAttempts[activeRoom.id] >= MAX_PIN_ATTEMPTS ? (
+                  <p className="mt-2 text-[11px] text-red-300">Room locked after 3 failed PIN attempts.</p>
+                ) : null}
+              </div>
+            ) : null}
+
             {/* Messages Area */}
             <ScrollArea ref={messagesScrollAreaRef} className="flex-1 h-0 p-2 sm:p-3 md:p-8 overscroll-contain">
               <div className="max-w-4xl mx-auto space-y-3 sm:space-y-4 md:space-y-8 pb-4">
@@ -1482,7 +1590,7 @@ export default function Chat({ user, keys }: ChatProps) {
                       <div className={`w-5 h-5 sm:w-6 sm:h-6 md:w-10 md:h-10 shrink-0 ${!showAvatar ? 'opacity-0' : ''}`}>
                         <Avatar className="w-full h-full border-2 border-zinc-900">
                           <AvatarFallback className="bg-zinc-900 text-[10px] md:text-xs text-zinc-500">
-                            {msg.senderId.slice(0, 2).toUpperCase()}
+                            {isMine ? 'Me' : 'A'}
                           </AvatarFallback>
                         </Avatar>
                       </div>
@@ -1490,7 +1598,7 @@ export default function Chat({ user, keys }: ChatProps) {
                       <div className={`flex flex-col max-w-[80%] sm:max-w-[75%] md:max-w-[70%] ${isMine ? 'items-end' : 'items-start'}`}>
                         {showAvatar && (
                           <span className="text-[9px] sm:text-[10px] text-zinc-600 mb-0.5 sm:mb-1 px-1 font-mono">
-                            {msg.senderId.slice(0, 8)}...
+                            {isMine ? 'You' : 'Anonymous'}
                           </span>
                         )}
                         
@@ -1584,6 +1692,7 @@ export default function Chat({ user, keys }: ChatProps) {
                       id="file-upload"
                       className="hidden"
                       onChange={handleFileUpload}
+                      disabled={!!activeRoom?.pinHash && !roomPinVerified[activeRoom.id]}
                     />
                     <label htmlFor="file-upload" className="cursor-pointer h-9 w-9 sm:h-10 sm:w-10 md:h-12 md:w-12 flex items-center justify-center rounded-lg sm:rounded-xl md:rounded-2xl text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition-colors active:scale-95">
                       <Paperclip className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6" />
@@ -1593,7 +1702,7 @@ export default function Chat({ user, keys }: ChatProps) {
                       variant="ghost"
                       size="icon"
                       onClick={handleSendLocation}
-                      disabled={loading || !roomKeys[activeRoom.id]}
+                      disabled={loading || !roomKeys[activeRoom.id] || (!!activeRoom?.pinHash && !roomPinVerified[activeRoom.id])}
                       className="h-9 w-9 sm:h-10 sm:w-10 md:h-12 md:w-12 rounded-lg sm:rounded-xl md:rounded-2xl text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition-colors active:scale-95"
                       aria-label="Send location"
                     >
@@ -1615,15 +1724,15 @@ export default function Chat({ user, keys }: ChatProps) {
                         handleSendMessage();
                       }
                     }}
-                    placeholder={!roomKeys[activeRoom.id] ? "Waiting for secure key..." : "Type a message..."}
-                    disabled={!roomKeys[activeRoom.id]}
+                    placeholder={activeRoom?.pinHash && !roomPinVerified[activeRoom.id] ? "Enter room PIN to unlock." : (!roomKeys[activeRoom.id] ? "Waiting for secure key..." : "Type a message...")}
+                    disabled={!roomKeys[activeRoom.id] || (!!activeRoom?.pinHash && !roomPinVerified[activeRoom.id])}
                     className="flex-1 bg-transparent border-none focus:ring-0 text-zinc-100 placeholder:text-zinc-600 resize-none py-2 sm:py-2.5 md:py-3.5 px-1 sm:px-2 text-[13px] sm:text-sm md:text-base max-h-32 min-h-[36px]"
                   />
                   
                   <Button 
                     size="icon"
                     onClick={handleSendMessage}
-                    disabled={!newMessage.trim() || loading || !roomKeys[activeRoom.id]}
+                    disabled={!newMessage.trim() || loading || !roomKeys[activeRoom.id] || (!!activeRoom?.pinHash && !roomPinVerified[activeRoom.id])}
                     className="h-9 w-9 sm:h-10 sm:w-10 md:h-12 md:w-12 rounded-lg sm:rounded-xl md:rounded-2xl bg-zinc-100 text-zinc-950 hover:bg-zinc-200 shrink-0 shadow-lg active:scale-95 transition-transform"
                   >
                     {loading ? <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> : <Send className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6" />}
@@ -1699,10 +1808,21 @@ export default function Chat({ user, keys }: ChatProps) {
                       className="bg-zinc-950 border-zinc-800"
                     />
                   </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Room PIN</label>
+                    <Input
+                      placeholder="4-digit PIN"
+                      value={newRoomPin}
+                      onChange={(e) => setNewRoomPin(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))}
+                      className="bg-zinc-950 border-zinc-800"
+                      maxLength={4}
+                    />
+                    {pinError ? <p className="text-[10px] text-red-500">{pinError}</p> : null}
+                  </div>
                   <div className="p-3 rounded-lg bg-zinc-950/50 border border-zinc-800 flex items-start space-x-3">
                     <Shield className="w-4 h-4 mt-0.5 text-emerald-500" />
                     <p className="text-[10px] text-zinc-500 leading-relaxed">
-                      A unique symmetric key will be generated for this room and shared securely with members.
+                      A unique symmetric key will be generated for this room and shared securely with members. PIN access is required for all participants.
                     </p>
                   </div>
                 </CardContent>
@@ -1710,7 +1830,7 @@ export default function Chat({ user, keys }: ChatProps) {
                   <Button variant="ghost" onClick={() => setIsCreatingRoom(false)} className="text-zinc-500">Cancel</Button>
                   <Button 
                     onClick={handleCreateRoom} 
-                    disabled={!newRoomName || loading || !isSodiumReady}
+                    disabled={!newRoomName || !newRoomPin || newRoomPin.length !== 4 || loading || !isSodiumReady}
                     className="bg-zinc-100 text-zinc-950 hover:bg-zinc-200"
                   >
                     {loading || !isSodiumReady ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Create Room'}

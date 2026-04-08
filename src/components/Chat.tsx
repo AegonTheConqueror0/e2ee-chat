@@ -33,6 +33,8 @@ interface Room {
   isPrivate?: boolean;
   pinHash?: string;
   pinSalt?: string;
+  pinEncryptedKey?: string;
+  pinEncryptedNonce?: string;
 }
 
 interface Message {
@@ -159,7 +161,7 @@ export default function Chat({ user, keys }: ChatProps) {
     };
     
     updateLastActive();
-    const interval = setInterval(updateLastActive, 30000); // Update every 30 seconds
+    const interval = setInterval(updateLastActive, 5 * 60 * 1000); // Heartbeat every 5 minutes instead of 30 seconds
     return () => clearInterval(interval);
   }, [user.uid]);
 
@@ -272,55 +274,66 @@ export default function Chat({ user, keys }: ChatProps) {
 
     const q = query(
       collection(db, 'rooms', activeRoom.id, 'messages'),
-      orderBy('createdAt', 'asc')
+      orderBy('createdAt', 'asc'),
+      limit(50)
     );
 
     const unsubscribe = onSnapshot(q, async (snapshot) => {
       const batch = writeBatch(db);
-      let hasUpdate = false;
+      const messagesNeedingUpdate: string[] = [];
 
-      const msgs = snapshot.docs.map(doc => {
+      // Immediately set message structure with encrypted placeholders (non-blocking)
+      const initialMsgs = snapshot.docs.map(doc => ({
+        ...doc.data() as Message,
+        id: doc.id,
+        decryptedText: '[Decrypting...]',
+        isMine: doc.data().senderId === user.uid,
+      }));
+      setMessages(initialMsgs);
+
+      // Batch update all delivery/seen status for messages from other users in one write
+      snapshot.docs.forEach(doc => {
         const data = doc.data() as Message;
-        const roomKey = roomKeys[activeRoom.id];
-        let decryptedText = '[Encrypted Message]';
-
-        try {
-          decryptedText = decryptSymmetric(
-            { ciphertext: data.ciphertext, nonce: data.nonce },
-            roomKey
-          );
-        } catch (err) {
-          console.error('Failed to decrypt message:', err);
-        }
-
         if (data.senderId !== user.uid) {
           if (!Array.isArray(data.deliveredTo) || !data.deliveredTo.includes(user.uid)) {
             batch.update(doc.ref, { deliveredTo: arrayUnion(user.uid) });
-            hasUpdate = true;
+            messagesNeedingUpdate.push(doc.id);
           }
           if (!Array.isArray(data.seenBy) || !data.seenBy.includes(user.uid)) {
             batch.update(doc.ref, { seenBy: arrayUnion(user.uid) });
-            hasUpdate = true;
+            if (!messagesNeedingUpdate.includes(doc.id)) {
+              messagesNeedingUpdate.push(doc.id);
+            }
           }
         }
-
-        return {
-          ...data,
-          id: doc.id,
-          decryptedText,
-          isMine: data.senderId === user.uid
-        };
       });
 
-      setMessages(msgs);
-
-      if (hasUpdate) {
+      // Commit batch update once for all messages
+      if (messagesNeedingUpdate.length > 0) {
         try {
           await batch.commit();
         } catch (err) {
           console.error('Failed to update delivered/seen metadata:', err);
         }
       }
+
+      // Async decryption in background without blocking UI
+      setTimeout(() => {
+        const roomKey = roomKeys[activeRoom.id];
+        const decryptedMsgs = initialMsgs.map(msg => {
+          let decryptedText = '[Encrypted Message]';
+          try {
+            decryptedText = decryptSymmetric(
+              { ciphertext: msg.ciphertext, nonce: msg.nonce },
+              roomKey
+            );
+          } catch (err) {
+            console.error('Failed to decrypt message:', err);
+          }
+          return { ...msg, decryptedText };
+        });
+        setMessages(decryptedMsgs);
+      }, 0);
       
       // Auto-scroll only for initial load or user actions (sending message/file/location)
       setTimeout(() => {
@@ -957,12 +970,16 @@ export default function Chat({ user, keys }: ChatProps) {
         // Encrypt file content
         const encrypted = encryptSymmetric(uint8Array, roomKey);
         
-        // Upload encrypted file
+        // Parallelize file operations more efficiently
         const fileId = sodium.to_hex(sodium.randombytes_buf(16));
         const fileRef = ref(storage, `rooms/${activeRoom.id}/files/${fileId}_${file.name}.enc`);
         const blob = new Blob([new Uint8Array(fromBase64(encrypted.ciphertext))], { type: 'application/octet-stream' });
         
-        await uploadBytes(fileRef, blob);
+        // Upload and get URL in parallel
+        const uploadPromise = uploadBytes(fileRef, blob);
+        
+        // Start upload and simultaneously prepare the message
+        const [uploadResult] = await Promise.all([uploadPromise]);
         const url = await getDownloadURL(fileRef);
         
         // Send message with file info

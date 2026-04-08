@@ -79,7 +79,8 @@ export default function Chat({ user, keys }: ChatProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const messagesScrollAreaRef = useRef<HTMLDivElement>(null);
   const [isUserAtBottom, setIsUserAtBottom] = useState(true);
-  const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
+  const [shouldAutoScroll, setShouldAutoScroll] = useState(false);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
 
   const [isKeyMismatch, setIsKeyMismatch] = useState(false);
 
@@ -307,10 +308,14 @@ export default function Chat({ user, keys }: ChatProps) {
             const { scrollTop, scrollHeight, clientHeight } = viewport;
             const isAtBottom = scrollTop + clientHeight >= scrollHeight - 10;
             
-            // Only auto-scroll if user is at bottom OR if shouldAutoScroll is explicitly set (for sending messages)
-            if (isAtBottom || shouldAutoScroll) {
+            // Auto-scroll for initial load, user actions, or when user is at bottom
+            if (isInitialLoad || shouldAutoScroll || isAtBottom) {
               viewport.scrollTop = viewport.scrollHeight;
-              // Reset shouldAutoScroll after using it
+              
+              // Reset flags after using them
+              if (isInitialLoad) {
+                setIsInitialLoad(false);
+              }
               if (shouldAutoScroll) {
                 setShouldAutoScroll(false);
               }
@@ -335,7 +340,10 @@ export default function Chat({ user, keys }: ChatProps) {
       const { scrollTop, scrollHeight, clientHeight } = viewport;
       const isAtBottom = scrollTop + clientHeight >= scrollHeight - 10; // 10px tolerance
       setIsUserAtBottom(isAtBottom);
-      // Note: shouldAutoScroll is only set to true when sending messages
+      // Reset initial load flag if user scrolls manually
+      if (!isAtBottom) {
+        setIsInitialLoad(false);
+      }
     };
 
     viewport.addEventListener('scroll', handleScroll, { passive: true });
@@ -353,7 +361,7 @@ export default function Chat({ user, keys }: ChatProps) {
       setShowMobileSidebar(false);
       // Reset scroll state when entering a room - allow initial scroll to bottom
       setIsUserAtBottom(true);
-      setShouldAutoScroll(true);
+      setIsInitialLoad(true);
     }
   }, [activeRoom?.id]);
 

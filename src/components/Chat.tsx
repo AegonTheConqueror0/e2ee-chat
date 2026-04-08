@@ -77,6 +77,9 @@ export default function Chat({ user, keys }: ChatProps) {
   
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const messagesScrollAreaRef = useRef<HTMLDivElement>(null);
+  const [isUserAtBottom, setIsUserAtBottom] = useState(true);
+  const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
 
   const [isKeyMismatch, setIsKeyMismatch] = useState(false);
 
@@ -296,20 +299,53 @@ export default function Chat({ user, keys }: ChatProps) {
         }
       }
       
-      // Scroll to bottom
-      setTimeout(() => {
-        if (scrollRef.current) {
-          scrollRef.current.scrollIntoView({ behavior: 'smooth' });
-        }
-      }, 100);
+      // Auto-scroll to bottom only if user is already at bottom or if this is initial load
+      if (shouldAutoScroll) {
+        setTimeout(() => {
+          if (messagesScrollAreaRef.current) {
+            const viewport = messagesScrollAreaRef.current.querySelector('[data-slot="scroll-area-viewport"]') as HTMLElement;
+            if (viewport) {
+              viewport.scrollTop = viewport.scrollHeight;
+            }
+          }
+        }, 100);
+      }
     });
 
     return () => unsubscribe();
   }, [activeRoom, roomKeys, user.uid]);
 
+  // --- Scroll Position Tracking ---
+
+  useEffect(() => {
+    if (!messagesScrollAreaRef.current) return;
+
+    const viewport = messagesScrollAreaRef.current.querySelector('[data-slot="scroll-area-viewport"]') as HTMLElement;
+    if (!viewport) return;
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = viewport;
+      const isAtBottom = scrollTop + clientHeight >= scrollHeight - 10; // 10px tolerance
+      setIsUserAtBottom(isAtBottom);
+      setShouldAutoScroll(isAtBottom);
+    };
+
+    viewport.addEventListener('scroll', handleScroll, { passive: true });
+    
+    // Initial check
+    handleScroll();
+
+    return () => {
+      viewport.removeEventListener('scroll', handleScroll);
+    };
+  }, [activeRoom?.id]); // Re-run when room changes
+
   useEffect(() => {
     if (activeRoom) {
       setShowMobileSidebar(false);
+      // Reset scroll state when entering a room
+      setIsUserAtBottom(true);
+      setShouldAutoScroll(true);
     }
   }, [activeRoom?.id]);
 
@@ -456,6 +492,7 @@ export default function Chat({ user, keys }: ChatProps) {
     const signature = signData(newMessage, keys.signing.privateKey);
     
     setNewMessage('');
+    setShouldAutoScroll(true); // Always scroll when sending a message
     
     try {
       const messageId = sodium.to_hex(sodium.randombytes_buf(16));
@@ -488,6 +525,7 @@ export default function Chat({ user, keys }: ChatProps) {
     }
 
     setLoading(true);
+    setShouldAutoScroll(true); // Always scroll when sending location
     try {
       const position = await new Promise<GeolocationPosition>((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(resolve, reject, {
@@ -705,6 +743,7 @@ export default function Chat({ user, keys }: ChatProps) {
     if (fileInputRef.current) fileInputRef.current.value = '';
     
     setLoading(true);
+    setShouldAutoScroll(true); // Always scroll when uploading file
     try {
       const roomKey = roomKeys[activeRoom.id];
       const reader = new FileReader();
@@ -1292,7 +1331,7 @@ export default function Chat({ user, keys }: ChatProps) {
             </div>
 
             {/* Messages Area */}
-            <ScrollArea className="flex-1 h-0 p-2 sm:p-3 md:p-8 overscroll-contain touch-pan-y">
+            <ScrollArea ref={messagesScrollAreaRef} className="flex-1 h-0 p-2 sm:p-3 md:p-8 overscroll-contain touch-pan-y">
               <div className="max-w-4xl mx-auto space-y-3 sm:space-y-4 md:space-y-8 pb-4">
                 {messages.map((msg, i) => {
                   const isMine = msg.senderId === user.uid;

@@ -672,6 +672,21 @@ export default function Chat({ user, keys }: ChatProps) {
     }
   };
 
+  const handleDeleteMessage = async (messageId: string) => {
+    if (!activeRoom || !confirm('Delete this message? It will be removed for all members in the room.')) return;
+    
+    try {
+      await deleteDoc(doc(db, 'rooms', activeRoom.id, 'messages', messageId));
+      // Remove from cache
+      delete decryptCacheRef.current[messageId];
+      toast.success('Message deleted for everyone.');
+    } catch (err) {
+      console.error('Delete message error:', err);
+      toast.error('Failed to delete message.');
+      handleFirestoreError(err, OperationType.DELETE, `rooms/${activeRoom.id}/messages/${messageId}`);
+    }
+  };
+
   const handleSendMessage = async () => {
     if (!newMessage || !activeRoom || !roomKeys[activeRoom.id]) return;
     
@@ -985,61 +1000,62 @@ export default function Chat({ user, keys }: ChatProps) {
     if (fileInputRef.current) fileInputRef.current.value = '';
     
     setLoading(true);
-    setShouldAutoScroll(true); // Always scroll when uploading file
+    setShouldAutoScroll(true);
     setShowJumpToBottom(false);
+    
     try {
+      // Read file as ArrayBuffer
+      const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as ArrayBuffer);
+        reader.onerror = () => reject(new Error('Failed to read file'));
+        reader.readAsArrayBuffer(file);
+      });
+
+      const uint8Array = new Uint8Array(arrayBuffer);
       const roomKey = roomKeys[activeRoom.id];
-      const reader = new FileReader();
-      reader.onload = async () => {
-        const arrayBuffer = reader.result as ArrayBuffer;
-        const uint8Array = new Uint8Array(arrayBuffer);
-        
-        // Encrypt file content
-        const encrypted = encryptSymmetric(uint8Array, roomKey);
-        
-        // Parallelize file operations more efficiently
-        const fileId = sodium.to_hex(sodium.randombytes_buf(16));
-        const fileRef = ref(storage, `rooms/${activeRoom.id}/files/${fileId}_${file.name}.enc`);
-        const blob = new Blob([new Uint8Array(fromBase64(encrypted.ciphertext))], { type: 'application/octet-stream' });
-        
-        // Upload and get URL in parallel
-        const uploadPromise = uploadBytes(fileRef, blob);
-        
-        // Start upload and simultaneously prepare the message
-        const [uploadResult] = await Promise.all([uploadPromise]);
-        const url = await getDownloadURL(fileRef);
-        
-        // Send message with file info
-        const fileInfo = JSON.stringify({
-          type: 'file',
-          name: file.name,
-          url: url,
-          nonce: encrypted.nonce,
-          mimeType: file.type,
-        });
-        
-        const msgEncrypted = encryptSymmetric(fileInfo, roomKey);
-        const signature = signData(fileInfo, keys.signing.privateKey);
-        
-        const messageId = sodium.to_hex(sodium.randombytes_buf(16));
-        await setDoc(doc(db, 'rooms', activeRoom.id, 'messages', messageId), {
-          id: messageId,
-          roomId: activeRoom.id,
-          senderId: user.uid,
-          ciphertext: msgEncrypted.ciphertext,
-          nonce: msgEncrypted.nonce,
-          signature: signature,
-          createdAt: serverTimestamp(),
-          deliveredTo: [],
-          seenBy: [],
-        });
-        
-        toast.success('File uploaded.');
-        setLoading(false);
-      };
-      reader.readAsArrayBuffer(file);
+      
+      // Encrypt file
+      const encrypted = encryptSymmetric(uint8Array, roomKey);
+      const fileId = sodium.to_hex(sodium.randombytes_buf(16));
+      const fileRef = ref(storage, `rooms/${activeRoom.id}/files/${fileId}_${file.name}.enc`);
+      const blob = new Blob([new Uint8Array(fromBase64(encrypted.ciphertext))], { type: 'application/octet-stream' });
+      
+      // Upload file to storage
+      await uploadBytes(fileRef, blob);
+      const url = await getDownloadURL(fileRef);
+      
+      // Create file info message
+      const fileInfo = JSON.stringify({
+        type: 'file',
+        name: file.name,
+        url: url,
+        nonce: encrypted.nonce,
+        mimeType: file.type,
+      });
+      
+      const msgEncrypted = encryptSymmetric(fileInfo, roomKey);
+      const signature = signData(fileInfo, keys.signing.privateKey);
+      
+      // Send message with file info
+      const messageId = sodium.to_hex(sodium.randombytes_buf(16));
+      await setDoc(doc(db, 'rooms', activeRoom.id, 'messages', messageId), {
+        id: messageId,
+        roomId: activeRoom.id,
+        senderId: user.uid,
+        ciphertext: msgEncrypted.ciphertext,
+        nonce: msgEncrypted.nonce,
+        signature: signature,
+        createdAt: serverTimestamp(),
+        deliveredTo: [user.uid],
+        seenBy: [user.uid],
+      });
+      
+      toast.success('Image uploaded.');
+      setLoading(false);
     } catch (err) {
-      toast.error('File upload failed.');
+      console.error('File upload error:', err);
+      toast.error('Image upload failed. Try a smaller file.');
       handleFirestoreError(err, OperationType.CREATE, `rooms/${activeRoom.id}/messages`);
       setLoading(false);
     }
@@ -1781,10 +1797,19 @@ export default function Chat({ user, keys }: ChatProps) {
                             </p>
                           )}
                           
-                          <div className={`absolute bottom-0 ${isMine ? '-left-12' : '-right-12'} opacity-0 group-hover:opacity-100 transition-opacity`}>
+                          <div className={`absolute bottom-0 ${isMine ? '-left-12' : '-right-12'} opacity-0 group-hover:opacity-100 transition-opacity flex gap-1`}>
                             <div className="p-1.5 rounded-lg bg-zinc-900 border border-zinc-800 shadow-xl">
                               <Shield className="w-3 h-3 text-emerald-500" />
                             </div>
+                            {isMine && (
+                              <button
+                                onClick={() => handleDeleteMessage(msg.id)}
+                                className="p-1.5 rounded-lg bg-zinc-900 border border-zinc-800 shadow-xl hover:bg-red-900/50 hover:border-red-700 transition-colors"
+                                title="Delete for everyone"
+                              >
+                                <Trash2 className="w-3 h-3 text-red-400 hover:text-red-300" />
+                              </button>
+                            )}
                           </div>
                         </div>
                         

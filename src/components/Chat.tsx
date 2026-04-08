@@ -1027,8 +1027,31 @@ export default function Chat({ user, keys }: ChatProps) {
     try {
       const roomKey = roomKeys[activeRoom.id];
       const batch = writeBatch(db);
+
+      // If this room is PIN-protected, refresh the shared PIN-encrypted backup too.
+      let pin = '';
+      if (activeRoom.pinHash && activeRoom.pinSalt) {
+        pin = window.prompt('Enter the room PIN to repair access across devices:') || '';
+        if (!pin || !/^[0-9]{4}$/.test(pin)) {
+          toast.error('A valid 4-digit PIN is required to repair access for PIN-protected rooms.');
+          setLoading(false);
+          return;
+        }
+
+        if (!verifyRoomPin(pin, activeRoom.pinSalt, activeRoom.pinHash)) {
+          toast.error('Incorrect room PIN. Cannot repair PIN access.');
+          setLoading(false);
+          return;
+        }
+
+        const pinEncryptedKey = await encryptRoomKeyWithPin(roomKey, pin, activeRoom.pinSalt);
+        batch.update(doc(db, 'rooms', activeRoom.id), {
+          pinEncryptedKey: pinEncryptedKey.ciphertext,
+          pinEncryptedNonce: pinEncryptedKey.nonce,
+        });
+      }
       
-      // Fetch all members' latest public keys
+      // Fetch all members' latest public keys and update their encrypted room key docs.
       for (const memberId of activeRoom.members) {
         const userDoc = await getDoc(doc(db, 'users', memberId));
         if (userDoc.exists()) {
@@ -1632,11 +1655,18 @@ export default function Chat({ user, keys }: ChatProps) {
 
             {/* Messages Area */}
             <ScrollArea ref={messagesScrollAreaRef} className="flex-1 h-0 p-2 sm:p-3 md:p-8 overscroll-contain">
-              <div className="max-w-4xl mx-auto space-y-3 sm:space-y-4 md:space-y-8 pb-4">
-                {messages.map((msg, i) => {
-                  const isMine = msg.senderId === user.uid;
-                  const prevMsg = messages[i - 1];
-                  const showAvatar = !prevMsg || prevMsg.senderId !== msg.senderId;
+              <div className="max-w-4xl mx-auto flex flex-col space-y-3 sm:space-y-4 md:space-y-8 pb-4">
+                {messages
+                  .slice()
+                  .sort((a, b) => {
+                    const aTime = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0;
+                    const bTime = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
+                    return aTime - bTime;
+                  })
+                  .map((msg, i, sortedMessages) => {
+                    const isMine = msg.senderId === user.uid;
+                    const prevMsg = sortedMessages[i - 1];
+                    const showAvatar = !prevMsg || prevMsg.senderId !== msg.senderId;
                   
                   let fileData = null;
                   let locationData = null;

@@ -88,6 +88,7 @@ export default function Chat({ user, keys }: ChatProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const messagesScrollAreaRef = useRef<HTMLDivElement>(null);
+  const decryptCacheRef = useRef<Record<string, string>>({});
   const [shouldAutoScroll, setShouldAutoScroll] = useState(false);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -281,32 +282,49 @@ export default function Chat({ user, keys }: ChatProps) {
     const unsubscribe = onSnapshot(q, async (snapshot) => {
       const batch = writeBatch(db);
       const messagesNeedingUpdate: string[] = [];
+      const roomKey = roomKeys[activeRoom.id];
 
-      // Immediately set message structure with encrypted placeholders (non-blocking)
-      const initialMsgs = snapshot.docs.map(doc => ({
-        ...doc.data() as Message,
-        id: doc.id,
-        decryptedText: '[Decrypting...]',
-        isMine: doc.data().senderId === user.uid,
-      }));
-      setMessages(initialMsgs);
-
-      // Batch update all delivery/seen status for messages from other users in one write
-      snapshot.docs.forEach(doc => {
+      // Decrypt all messages synchronously using cache to avoid flickering
+      const msgs = snapshot.docs.map(doc => {
         const data = doc.data() as Message;
+        const msgId = doc.id;
+        
+        // Use cache to avoid re-decrypting same message
+        if (!decryptCacheRef.current[msgId]) {
+          try {
+            decryptCacheRef.current[msgId] = decryptSymmetric(
+              { ciphertext: data.ciphertext, nonce: data.nonce },
+              roomKey
+            );
+          } catch (err) {
+            console.error('Failed to decrypt message:', err);
+            decryptCacheRef.current[msgId] = '[Encrypted Message]';
+          }
+        }
+
         if (data.senderId !== user.uid) {
           if (!Array.isArray(data.deliveredTo) || !data.deliveredTo.includes(user.uid)) {
             batch.update(doc.ref, { deliveredTo: arrayUnion(user.uid) });
-            messagesNeedingUpdate.push(doc.id);
+            messagesNeedingUpdate.push(msgId);
           }
           if (!Array.isArray(data.seenBy) || !data.seenBy.includes(user.uid)) {
             batch.update(doc.ref, { seenBy: arrayUnion(user.uid) });
-            if (!messagesNeedingUpdate.includes(doc.id)) {
-              messagesNeedingUpdate.push(doc.id);
+            if (!messagesNeedingUpdate.includes(msgId)) {
+              messagesNeedingUpdate.push(msgId);
             }
           }
         }
+
+        return {
+          ...data,
+          id: msgId,
+          decryptedText: decryptCacheRef.current[msgId],
+          isMine: data.senderId === user.uid
+        };
       });
+
+      // Set all messages at once - no flickering
+      setMessages(msgs);
 
       // Commit batch update once for all messages
       if (messagesNeedingUpdate.length > 0) {
@@ -316,24 +334,6 @@ export default function Chat({ user, keys }: ChatProps) {
           console.error('Failed to update delivered/seen metadata:', err);
         }
       }
-
-      // Async decryption in background without blocking UI
-      setTimeout(() => {
-        const roomKey = roomKeys[activeRoom.id];
-        const decryptedMsgs = initialMsgs.map(msg => {
-          let decryptedText = '[Encrypted Message]';
-          try {
-            decryptedText = decryptSymmetric(
-              { ciphertext: msg.ciphertext, nonce: msg.nonce },
-              roomKey
-            );
-          } catch (err) {
-            console.error('Failed to decrypt message:', err);
-          }
-          return { ...msg, decryptedText };
-        });
-        setMessages(decryptedMsgs);
-      }, 0);
       
       // Auto-scroll only for initial load or user actions (sending message/file/location)
       setTimeout(() => {
@@ -393,6 +393,8 @@ export default function Chat({ user, keys }: ChatProps) {
       // Reset scroll state when entering a room - allow initial scroll to bottom
       setIsInitialLoad(true);
       setShowJumpToBottom(false);
+      // Clear decryption cache for new room to free memory
+      decryptCacheRef.current = {};
     }
   }, [activeRoom?.id]);
 
@@ -674,30 +676,55 @@ export default function Chat({ user, keys }: ChatProps) {
     if (!newMessage || !activeRoom || !roomKeys[activeRoom.id]) return;
     
     const roomKey = roomKeys[activeRoom.id];
-    const encrypted = encryptSymmetric(newMessage, roomKey);
-    const signature = signData(newMessage, keys.signing.privateKey);
+    const messageText = newMessage;
+    const messageId = sodium.to_hex(sodium.randombytes_buf(16));
+    
+    // Optimistic update - show message immediately
+    const optimisticMsg: Message = {
+      id: messageId,
+      roomId: activeRoom.id,
+      senderId: user.uid,
+      ciphertext: '',
+      nonce: '',
+      signature: '',
+      createdAt: new Date(),
+      decryptedText: messageText,
+      isMine: true,
+      deliveredTo: [user.uid],
+      seenBy: [user.uid],
+    };
+    decryptCacheRef.current[messageId] = messageText;
+    setMessages(prev => [...prev, optimisticMsg]);
     
     setNewMessage('');
-    setShouldAutoScroll(true); // Always scroll when sending a message
+    setShouldAutoScroll(true);
     setShowJumpToBottom(false);
     
-    try {
-      const messageId = sodium.to_hex(sodium.randombytes_buf(16));
-      await setDoc(doc(db, 'rooms', activeRoom.id, 'messages', messageId), {
-        id: messageId,
-        roomId: activeRoom.id,
-        senderId: user.uid,
-        ciphertext: encrypted.ciphertext,
-        nonce: encrypted.nonce,
-        signature: signature,
-        createdAt: serverTimestamp(),
-        deliveredTo: [],
-        seenBy: [],
-      });
-    } catch (err) {
-      toast.error('Failed to send message.');
-      handleFirestoreError(err, OperationType.CREATE, `rooms/${activeRoom.id}/messages`);
-    }
+    // Send in background without awaiting - faster UI response
+    (async () => {
+      try {
+        const encrypted = encryptSymmetric(messageText, roomKey);
+        const signature = signData(messageText, keys.signing.privateKey);
+        
+        await setDoc(doc(db, 'rooms', activeRoom.id, 'messages', messageId), {
+          id: messageId,
+          roomId: activeRoom.id,
+          senderId: user.uid,
+          ciphertext: encrypted.ciphertext,
+          nonce: encrypted.nonce,
+          signature: signature,
+          createdAt: serverTimestamp(),
+          deliveredTo: [user.uid],
+          seenBy: [user.uid],
+        });
+      } catch (err) {
+        console.error('Failed to send message:', err);
+        // Remove optimistic message on failure
+        setMessages(prev => prev.filter(m => m.id !== messageId));
+        toast.error('Failed to send message.');
+        handleFirestoreError(err, OperationType.CREATE, `rooms/${activeRoom.id}/messages`);
+      }
+    })();
   };
 
   const handleSendLocation = async () => {

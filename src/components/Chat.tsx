@@ -680,9 +680,15 @@ export default function Chat({ user, keys }: ChatProps) {
       // Remove from cache
       delete decryptCacheRef.current[messageId];
       toast.success('Message deleted for everyone.');
-    } catch (err) {
+    } catch (err: any) {
       console.error('Delete message error:', err);
-      toast.error('Failed to delete message.');
+      
+      if (err.code === 'permission-denied') {
+        toast.error('Can only delete your own messages.');
+      } else {
+        toast.error('Failed to delete message.');
+      }
+      
       handleFirestoreError(err, OperationType.DELETE, `rooms/${activeRoom.id}/messages/${messageId}`);
     }
   };
@@ -945,11 +951,14 @@ export default function Chat({ user, keys }: ChatProps) {
     setLoading(true);
     try {
       const roomRef = doc(db, 'rooms', activeRoom.id);
+      
+      // Get subcollections
       const [messagesSnapshot, keysSnapshot] = await Promise.all([
         getDocs(collection(db, 'rooms', activeRoom.id, 'messages')),
         getDocs(collection(db, 'rooms', activeRoom.id, 'keys')),
       ]);
 
+      // Delete all messages and keys in batches
       const allDeleteRefs = [
         ...messagesSnapshot.docs.map(docSnap => docSnap.ref),
         ...keysSnapshot.docs.map(docSnap => docSnap.ref),
@@ -962,8 +971,10 @@ export default function Chat({ user, keys }: ChatProps) {
         await batch.commit();
       }
 
+      // Delete room document
       await deleteDoc(roomRef);
 
+      // Delete associated files in storage (optional - won't fail the operation)
       try {
         const filesRef = ref(storage, `rooms/${activeRoom.id}/files`);
         const fileList = await listAll(filesRef);
@@ -972,6 +983,7 @@ export default function Chat({ user, keys }: ChatProps) {
         console.warn('Unable to delete associated room storage files:', storageError);
       }
 
+      // Clean up local state
       setRoomKeys(prev => {
         const updated = { ...prev };
         delete updated[activeRoom.id];
@@ -985,9 +997,18 @@ export default function Chat({ user, keys }: ChatProps) {
       setActiveRoom(null);
       setShowMobileSidebar(true);
       toast.success('Room deleted successfully.');
-    } catch (err) {
-      toast.error('Failed to delete room.');
+    } catch (err: any) {
       console.error('Delete room error:', err);
+      
+      // Provide specific error messages
+      if (err.code === 'permission-denied') {
+        toast.error('Permission denied. Only room members can delete the room.');
+      } else if (err.message?.includes('not found') || err.code === 'not-found') {
+        toast.error('Room not found.');
+      } else {
+        toast.error('Failed to delete room. Please try again.');
+      }
+      
       handleFirestoreError(err, OperationType.DELETE, `rooms/${activeRoom?.id}`);
     } finally {
       setLoading(false);

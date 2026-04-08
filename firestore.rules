@@ -129,6 +129,9 @@ service cloud.firestore {
       allow update: if isAuthenticated() && 
                     resource.data.members.hasAny([request.auth.uid]) &&
                     isValidRoomUpdate(request.resource.data);
+      
+      // Members can delete room
+      allow delete: if isAuthenticated() && resource.data.members.hasAny([request.auth.uid]);
 
       // Room Keys (Subcollection)
       match /keys/{userId} {
@@ -154,8 +157,8 @@ service cloud.firestore {
                       request.resource.data.senderId == request.auth.uid &&
                       request.resource.data.roomId == roomId;
         
-        // Messages are immutable
-        allow update, delete: if false;
+        // Sender can delete their own messages for everyone
+        allow delete: if isRoomMember(roomId) && resource.data.senderId == request.auth.uid;
       }
     }
 

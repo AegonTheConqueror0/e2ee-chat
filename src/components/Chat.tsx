@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { User as FirebaseUser } from 'firebase/auth';
-import { IdentityKeys, encryptSymmetric, decryptSymmetric, generateRoomKey, signData, verifySignature, encryptAsymmetric, decryptAsymmetric, toBase64, fromBase64 } from '@/lib/crypto';
-import { db, collection, query, where, onSnapshot, orderBy, addDoc, serverTimestamp, doc, getDoc, setDoc, getDocs, storage, auth, handleFirestoreError, OperationType, updateDoc, arrayUnion, limit, writeBatch } from '@/firebase';
+import { IdentityKeys, encryptSymmetric, decryptSymmetric, decryptSymmetricBytes, generateRoomKey, signData, verifySignature, encryptAsymmetric, decryptAsymmetric, toBase64, fromBase64 } from '@/lib/crypto';
+import { db, collection, query, where, onSnapshot, orderBy, addDoc, serverTimestamp, doc, getDoc, setDoc, getDocs, storage, auth, handleFirestoreError, OperationType, updateDoc, arrayUnion, limit, writeBatch, deleteDoc } from '@/firebase';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -11,7 +11,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
-import { MessageSquare, Plus, Send, Shield, Users, Settings, LogOut, Paperclip, Loader2, Search, Key, Download, ChevronLeft, Hash, Lock, UserPlus } from 'lucide-react';
+import { MessageSquare, Plus, Send, Shield, Users, Settings, LogOut, Paperclip, Loader2, Search, Key, Download, ChevronLeft, Hash, Lock, UserPlus, Trash2, MapPin, Image, Video } from 'lucide-react';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'motion/react';
@@ -74,6 +74,7 @@ export default function Chat({ user, keys }: ChatProps) {
   const [userStatusMap, setUserStatusMap] = useState<Record<string, { lastActive: number; status: 'online' | 'away' | 'inactive' }>>({});
   
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [isKeyMismatch, setIsKeyMismatch] = useState(false);
 
@@ -431,6 +432,90 @@ export default function Chat({ user, keys }: ChatProps) {
     }
   };
 
+  const handleSendLocation = async () => {
+    if (!activeRoom || !roomKeys[activeRoom.id]) {
+      toast.error('Secure room not ready.');
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      toast.error('Geolocation is not supported in this browser.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: true,
+          maximumAge: 60000,
+          timeout: 20000,
+        });
+      });
+
+      const locationPayload = {
+        type: 'location',
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracy: position.coords.accuracy,
+        label: 'Shared location',
+      };
+
+      const roomKey = roomKeys[activeRoom.id];
+      const payload = JSON.stringify(locationPayload);
+      const encrypted = encryptSymmetric(payload, roomKey);
+      const signature = signData(payload, keys.signing.privateKey);
+
+      const messageId = sodium.to_hex(sodium.randombytes_buf(16));
+      await setDoc(doc(db, 'rooms', activeRoom.id, 'messages', messageId), {
+        id: messageId,
+        roomId: activeRoom.id,
+        senderId: user.uid,
+        ciphertext: encrypted.ciphertext,
+        nonce: encrypted.nonce,
+        signature,
+        createdAt: serverTimestamp(),
+      });
+      toast.success('Location shared securely.');
+    } catch (err) {
+      console.error('Send location error:', err);
+      toast.error('Failed to share location.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDownloadEncryptedFile = async (fileData: any) => {
+    if (!activeRoom || !roomKeys[activeRoom.id]) {
+      toast.error('Secure room not ready.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch(fileData.url);
+      if (!response.ok) throw new Error('Unable to fetch file.');
+      const encryptedArrayBuffer = await response.arrayBuffer();
+      const encryptedBytes = new Uint8Array(encryptedArrayBuffer);
+      const decryptedBytes = decryptSymmetricBytes({ ciphertext: sodium.to_base64(encryptedBytes), nonce: fileData.nonce }, roomKeys[activeRoom.id]);
+      const blob = new Blob([decryptedBytes], { type: fileData.mimeType || 'application/octet-stream' });
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = fileData.name || 'download';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(objectUrl);
+      toast.success('File downloaded securely.');
+    } catch (err) {
+      console.error('File download error:', err);
+      toast.error('Could not download file securely.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleAddMember = async (input: string) => {
     if (!activeRoom || !roomKeys[activeRoom.id] || !isSodiumReady) {
       toast.error('Security system not ready. Please wait.');
@@ -538,9 +623,40 @@ export default function Chat({ user, keys }: ChatProps) {
     }
   };
 
+  const handleDeleteRoom = async () => {
+    if (!activeRoom) return;
+    if (!confirm(`Delete ${activeRoom.decryptedName || 'this room'}? This action cannot be undone.`)) {
+      return;
+    }
+    setLoading(true);
+    try {
+      const roomRef = doc(db, 'rooms', activeRoom.id);
+      const [messagesSnapshot, keysSnapshot] = await Promise.all([
+        getDocs(collection(db, 'rooms', activeRoom.id, 'messages')),
+        getDocs(collection(db, 'rooms', activeRoom.id, 'keys')),
+      ]);
+
+      const batch = writeBatch(db);
+      messagesSnapshot.docs.forEach(docSnap => batch.delete(docSnap.ref));
+      keysSnapshot.docs.forEach(docSnap => batch.delete(docSnap.ref));
+      batch.delete(roomRef);
+      await batch.commit();
+
+      setActiveRoom(null);
+      setShowMobileSidebar(true);
+      toast.success('Room deleted successfully.');
+    } catch (err) {
+      toast.error('Failed to delete room.');
+      handleFirestoreError(err, OperationType.DELETE, `rooms/${activeRoom?.id}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !activeRoom || !roomKeys[activeRoom.id]) return;
+    if (fileInputRef.current) fileInputRef.current.value = '';
     
     setLoading(true);
     try {
@@ -566,7 +682,8 @@ export default function Chat({ user, keys }: ChatProps) {
           type: 'file',
           name: file.name,
           url: url,
-          nonce: encrypted.nonce
+          nonce: encrypted.nonce,
+          mimeType: file.type,
         });
         
         const msgEncrypted = encryptSymmetric(fileInfo, roomKey);
@@ -944,6 +1061,7 @@ export default function Chat({ user, keys }: ChatProps) {
                     <SheetHeader>
                       <SheetTitle className="text-zinc-100">Room Members</SheetTitle>
                     </SheetHeader>
+
                     <div className="py-8 space-y-6">
                       <div className="space-y-4">
                         <div className="flex items-center justify-between px-1">
@@ -1083,6 +1201,16 @@ export default function Chat({ user, keys }: ChatProps) {
                     </div>
                   </SheetContent>
                 </Sheet>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleDeleteRoom}
+                  disabled={loading}
+                  className="text-red-400 hover:bg-red-500/10"
+                  aria-label="Delete room"
+                >
+                  <Trash2 className="w-5 h-5" />
+                </Button>
               </div>
             </div>
 
@@ -1095,10 +1223,12 @@ export default function Chat({ user, keys }: ChatProps) {
                   const showAvatar = !prevMsg || prevMsg.senderId !== msg.senderId;
                   
                   let fileData = null;
+                  let locationData = null;
                   if (msg.decryptedText?.startsWith('{')) {
                     try {
                       const parsed = JSON.parse(msg.decryptedText);
                       if (parsed.type === 'file') fileData = parsed;
+                      if (parsed.type === 'location') locationData = parsed;
                     } catch (e) {}
                   }
 
@@ -1125,23 +1255,36 @@ export default function Chat({ user, keys }: ChatProps) {
                             : 'bg-zinc-900 text-zinc-100 rounded-tl-none border border-zinc-800'
                         }`}>
                           {fileData ? (
-                            <div className="flex items-center space-x-2 sm:space-x-3">
-                              <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${isMine ? 'bg-zinc-200' : 'bg-zinc-800'}`}>
-                                <Paperclip className="w-3.5 h-3.5 sm:w-4 sm:h-4 md:w-5 md:h-5" />
+                            <div className="flex flex-col space-y-2">
+                              <div className="flex items-center space-x-2 sm:space-x-3">
+                                <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${isMine ? 'bg-zinc-200' : 'bg-zinc-800'}`}>
+                                  <Paperclip className="w-3.5 h-3.5 sm:w-4 sm:h-4 md:w-5 md:h-5" />
+                                </div>
+                                <div className="overflow-hidden min-w-0">
+                                  <p className="text-[10px] sm:text-xs md:text-sm font-semibold truncate">{fileData.name}</p>
+                                  <p className="text-[9px] text-zinc-500 truncate max-w-[220px]">{fileData.mimeType || 'Encrypted file'}</p>
+                                </div>
                               </div>
-                              <div className="overflow-hidden min-w-0">
-                                <p className="text-[10px] sm:text-xs md:text-sm font-semibold truncate">{fileData.name}</p>
-                                <Button 
-                                  variant="link" 
-                                  size="sm" 
-                                  className={`h-auto p-0 text-[9px] sm:text-[10px] md:text-xs ${isMine ? 'text-zinc-600' : 'text-zinc-400'}`}
-                                  onClick={() => window.open(fileData.url)}
-                                >
-                                  <Download className="w-3 h-3 mr-1" />
-                                  Download Securely
-                                </Button>
-                              </div>
+                              <Button 
+                                variant="secondary" 
+                                size="sm" 
+                                className="w-full justify-center text-[9px] sm:text-[10px] md:text-xs"
+                                onClick={() => handleDownloadEncryptedFile(fileData)}
+                              >
+                                <Download className="w-3 h-3 mr-1" />
+                                Download Securely
+                              </Button>
                             </div>
+                          ) : locationData ? (
+                            <a
+                              href={`https://www.google.com/maps?q=${encodeURIComponent(`${locationData.latitude},${locationData.longitude}`)}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center rounded-2xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 hover:bg-slate-900"
+                            >
+                              <MapPin className="w-3.5 h-3.5 mr-2" />
+                              <span>{locationData.label || 'Shared location'}</span>
+                            </a>
                           ) : (
                             <p className="text-[13px] sm:text-xs md:text-sm leading-relaxed whitespace-pre-wrap break-words">
                               {msg.decryptedText}
@@ -1170,9 +1313,11 @@ export default function Chat({ user, keys }: ChatProps) {
             <div className="p-2 sm:p-3 md:p-8 border-t border-zinc-900 bg-zinc-950/50 backdrop-blur-xl">
               <div className="max-w-4xl mx-auto">
                 <div className="relative flex items-end space-x-1.5 sm:space-x-2 md:space-x-4 bg-zinc-900/50 border border-zinc-800 p-1.5 sm:p-2 md:p-3 rounded-xl sm:rounded-2xl md:rounded-3xl focus-within:border-zinc-700 transition-colors shadow-inner">
-                  <div className="flex items-center">
+                  <div className="flex items-center space-x-2">
                     <input
                       type="file"
+                      ref={fileInputRef}
+                      accept="image/*,video/*,*/*"
                       id="file-upload"
                       className="hidden"
                       onChange={handleFileUpload}
@@ -1180,6 +1325,17 @@ export default function Chat({ user, keys }: ChatProps) {
                     <label htmlFor="file-upload" className="cursor-pointer h-9 w-9 sm:h-10 sm:w-10 md:h-12 md:w-12 flex items-center justify-center rounded-lg sm:rounded-xl md:rounded-2xl text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition-colors active:scale-95">
                       <Paperclip className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6" />
                     </label>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={handleSendLocation}
+                      disabled={loading || !roomKeys[activeRoom.id]}
+                      className="h-9 w-9 sm:h-10 sm:w-10 md:h-12 md:w-12 rounded-lg sm:rounded-xl md:rounded-2xl text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition-colors active:scale-95"
+                      aria-label="Send location"
+                    >
+                      <MapPin className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6" />
+                    </Button>
                   </div>
                   
                   <textarea

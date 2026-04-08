@@ -129,6 +129,19 @@ export function decryptSymmetric(encrypted: EncryptedData, key: Uint8Array): str
   return sodium.to_string(decrypted);
 }
 
+export function decryptSymmetricBytes(encrypted: EncryptedData, key: Uint8Array): Uint8Array {
+  const ciphertext = sodium.from_base64(encrypted.ciphertext);
+  const nonce = sodium.from_base64(encrypted.nonce);
+
+  return sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+    null,
+    ciphertext,
+    null,
+    nonce,
+    key
+  );
+}
+
 // --- Asymmetric Encryption (X25519 / crypto_box) ---
 
 export function encryptAsymmetric(data: string, recipientPublicKey: Uint8Array, senderPrivateKey: Uint8Array): EncryptedData {

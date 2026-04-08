@@ -42,6 +42,8 @@ interface Message {
   signature: string;
   createdAt: any;
   decryptedText?: string;
+  deliveredTo?: string[];
+  seenBy?: string[];
   isMine?: boolean;
 }
 
@@ -71,7 +73,7 @@ export default function Chat({ user, keys }: ChatProps) {
   const [newRoomName, setNewRoomName] = useState('');
   const [isSodiumReady, setIsSodiumReady] = useState(false);
   const [showMobileSidebar, setShowMobileSidebar] = useState(true);
-  const [userStatusMap, setUserStatusMap] = useState<Record<string, { lastActive: number; status: 'online' | 'away' | 'inactive' }>>({});
+  const [userStatusMap, setUserStatusMap] = useState<Record<string, { lastActive: number; status: 'online' | 'away' | 'inactive'; currentRoomId?: string }>>({});
   
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -109,6 +111,7 @@ export default function Chat({ user, keys }: ChatProps) {
       snapshot.docs.forEach(doc => {
         const data = doc.data();
         const lastActive = data.lastActive?.toDate?.()?.getTime() || 0;
+        const currentRoomId = data.currentRoomId || undefined;
         const now = Date.now();
         const diff = now - lastActive;
         
@@ -121,7 +124,7 @@ export default function Chat({ user, keys }: ChatProps) {
           status = 'inactive';
         }
         
-        statusMap[doc.id] = { lastActive, status };
+        statusMap[doc.id] = { lastActive, status, currentRoomId };
       });
       setUserStatusMap(statusMap);
     });
@@ -146,6 +149,22 @@ export default function Chat({ user, keys }: ChatProps) {
     const interval = setInterval(updateLastActive, 30000); // Update every 30 seconds
     return () => clearInterval(interval);
   }, [user.uid]);
+
+  useEffect(() => {
+    if (!user.uid) return;
+
+    const updateCurrentRoom = async () => {
+      try {
+        await setDoc(doc(db, 'users', user.uid), {
+          currentRoomId: activeRoom?.id || null,
+        }, { merge: true });
+      } catch (err) {
+        console.error('Failed to update current room status:', err);
+      }
+    };
+
+    updateCurrentRoom();
+  }, [activeRoom?.id, user.uid]);
 
   // --- Room Subscription ---
 
@@ -230,12 +249,15 @@ export default function Chat({ user, keys }: ChatProps) {
       orderBy('createdAt', 'asc')
     );
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const unsubscribe = onSnapshot(q, async (snapshot) => {
+      const batch = writeBatch(db);
+      let hasUpdate = false;
+
       const msgs = snapshot.docs.map(doc => {
         const data = doc.data() as Message;
         const roomKey = roomKeys[activeRoom.id];
         let decryptedText = '[Encrypted Message]';
-        
+
         try {
           decryptedText = decryptSymmetric(
             { ciphertext: data.ciphertext, nonce: data.nonce },
@@ -245,6 +267,17 @@ export default function Chat({ user, keys }: ChatProps) {
           console.error('Failed to decrypt message:', err);
         }
 
+        if (data.senderId !== user.uid) {
+          if (!Array.isArray(data.deliveredTo) || !data.deliveredTo.includes(user.uid)) {
+            batch.update(doc.ref, { deliveredTo: arrayUnion(user.uid) });
+            hasUpdate = true;
+          }
+          if (!Array.isArray(data.seenBy) || !data.seenBy.includes(user.uid)) {
+            batch.update(doc.ref, { seenBy: arrayUnion(user.uid) });
+            hasUpdate = true;
+          }
+        }
+
         return {
           ...data,
           id: doc.id,
@@ -252,7 +285,16 @@ export default function Chat({ user, keys }: ChatProps) {
           isMine: data.senderId === user.uid
         };
       });
+
       setMessages(msgs);
+
+      if (hasUpdate) {
+        try {
+          await batch.commit();
+        } catch (err) {
+          console.error('Failed to update delivered/seen metadata:', err);
+        }
+      }
       
       // Scroll to bottom
       setTimeout(() => {
@@ -425,6 +467,8 @@ export default function Chat({ user, keys }: ChatProps) {
         nonce: encrypted.nonce,
         signature: signature,
         createdAt: serverTimestamp(),
+        deliveredTo: [user.uid],
+        seenBy: [user.uid],
       });
     } catch (err) {
       toast.error('Failed to send message.');
@@ -475,6 +519,8 @@ export default function Chat({ user, keys }: ChatProps) {
         nonce: encrypted.nonce,
         signature,
         createdAt: serverTimestamp(),
+        deliveredTo: [user.uid],
+        seenBy: [user.uid],
       });
       toast.success('Location shared securely.');
     } catch (err) {
@@ -698,6 +744,8 @@ export default function Chat({ user, keys }: ChatProps) {
           nonce: msgEncrypted.nonce,
           signature: signature,
           createdAt: serverTimestamp(),
+          deliveredTo: [user.uid],
+          seenBy: [user.uid],
         });
         
         toast.success('File uploaded.');
@@ -791,6 +839,34 @@ export default function Chat({ user, keys }: ChatProps) {
       case 'inactive':
         return 'Inactive';
     }
+  };
+
+  const getMemberPresenceLabel = (memberId: string) => {
+    const memberStatus = userStatusMap[memberId];
+    if (!memberStatus) {
+      return 'Inactive';
+    }
+
+    if (memberStatus.currentRoomId === activeRoom?.id) {
+      return memberStatus.status === 'online' ? 'In room' : 'Idle in room';
+    }
+
+    return getStatusLabel(memberStatus.status);
+  };
+
+  const getMessageStatus = (msg: Message) => {
+    if (!activeRoom || !msg.isMine) return '';
+    const otherMembers = activeRoom.members.filter(id => id !== user.uid);
+    if (otherMembers.length === 0) return 'Seen';
+
+    const deliveredTo = msg.deliveredTo || [];
+    const seenBy = msg.seenBy || [];
+    const allDelivered = otherMembers.every(id => deliveredTo.includes(id));
+    const allSeen = otherMembers.every(id => seenBy.includes(id));
+
+    if (allSeen) return 'Seen';
+    if (allDelivered) return 'Delivered';
+    return 'Sent';
   };
 
   const SidebarContent = () => (
@@ -1157,6 +1233,7 @@ export default function Chat({ user, keys }: ChatProps) {
                           {activeRoom.members.map(m => {
                             const memberData = allUsers.find(u => u.id === m);
                             const memberStatus = userStatusMap[m]?.status || 'inactive';
+                            const memberPresence = getMemberPresenceLabel(m);
                             return (
                               <div key={m} className="flex items-center justify-between p-3 rounded-xl bg-zinc-900/50 border border-zinc-800">
                                 <div className="flex items-center space-x-2 overflow-hidden flex-1">
@@ -1170,7 +1247,7 @@ export default function Chat({ user, keys }: ChatProps) {
                                   </div>
                                   <div className="overflow-hidden flex-1">
                                     <p className="text-xs font-semibold text-zinc-100 truncate">{memberData?.email || m.slice(0, 12)}</p>
-                                    <p className="text-[10px] text-zinc-500">{getStatusLabel(memberStatus)}</p>
+                                    <p className="text-[10px] text-zinc-500">{memberPresence}</p>
                                   </div>
                                 </div>
                                 {m === user.uid && <Badge className="bg-zinc-800 text-zinc-400 text-[10px] shrink-0">You</Badge>}
@@ -1298,8 +1375,13 @@ export default function Chat({ user, keys }: ChatProps) {
                           </div>
                         </div>
                         
-                        <span className="text-[9px] sm:text-[10px] text-zinc-600 mt-1 sm:mt-1.5 px-1">
-                          {msg.createdAt?.toDate ? format(msg.createdAt.toDate(), 'HH:mm') : '...'}
+                        <span className="text-[9px] sm:text-[10px] text-zinc-600 mt-1 sm:mt-1.5 px-1 flex items-center space-x-2">
+                          <span>{msg.createdAt?.toDate ? format(msg.createdAt.toDate(), 'HH:mm') : '...'}</span>
+                          {msg.isMine ? (
+                            <span className="rounded-full bg-zinc-900 px-2 py-0.5 text-[9px] text-zinc-400 uppercase tracking-[0.08em]">
+                              {getMessageStatus(msg)}
+                            </span>
+                          ) : null}
                         </span>
                       </div>
                     </div>

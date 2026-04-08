@@ -62,7 +62,7 @@ service cloud.firestore {
     }
 
     function isRoomMember(roomId) {
-      return isAuthenticated() && 
+      return isAuthenticated() &&
              get(/databases/$(database)/documents/rooms/$(roomId)).data.members.hasAny([request.auth.uid]);
     }
 
@@ -86,7 +86,7 @@ service cloud.firestore {
     match /users/{uid} {
       // Authenticated users can read public keys to initiate chats
       allow read: if isAuthenticated();
-      
+
       function isValidUser(data) {
         return hasRequiredFields(['uid', 'email', 'createdAt']) &&
                data.uid == uid &&
@@ -95,8 +95,8 @@ service cloud.firestore {
 
       // Only the user can create/update their own profile
       allow create: if isOwner(uid) && isValidUser(request.resource.data);
-      
-      allow update: if isOwner(uid) && 
+
+      allow update: if isOwner(uid) &&
                     isValidUser(request.resource.data) &&
                     request.resource.data.uid == resource.data.uid &&
                     request.resource.data.createdAt == resource.data.createdAt;
@@ -106,7 +106,7 @@ service cloud.firestore {
     match /rooms/{roomId} {
       // Members can read room info
       allow read: if isAuthenticated() && resource.data.members.hasAny([request.auth.uid]);
-      
+
       function isValidRoom(data) {
         return hasRequiredFields(['id', 'members', 'createdAt']) &&
                data.id == roomId &&
@@ -124,12 +124,12 @@ service cloud.firestore {
 
       // Any authenticated user can create a room, but they must be a member
       allow create: if isAuthenticated() && isValidRoom(request.resource.data);
-      
+
       // Members can update room (e.g. add members)
-      allow update: if isAuthenticated() && 
+      allow update: if isAuthenticated() &&
                     resource.data.members.hasAny([request.auth.uid]) &&
                     isValidRoomUpdate(request.resource.data);
-      
+
       // Members can delete room
       allow delete: if isAuthenticated() && resource.data.members.hasAny([request.auth.uid]);
 
@@ -137,26 +137,29 @@ service cloud.firestore {
       match /keys/{userId} {
         // Only the specific user can read their own encrypted room key
         allow read: if isOwner(userId);
-        
+
         // Allow a user to create their own key, or an existing member to add a key for someone else
         // We use getAfter to allow creation during a batch that also creates the room
         allow create: if isOwner(userId) || isRoomMember(roomId) || (isAuthenticated() && getAfter(/databases/$(database)/documents/rooms/$(roomId)).data.members.hasAny([request.auth.uid]));
-        
+
         // Users can update their own keys
         allow update: if isOwner(userId);
+
+        // Room members can delete keys when deleting the room
+        allow delete: if isAuthenticated() && get(/databases/$(database)/documents/rooms/$(roomId)).data.members.hasAny([request.auth.uid]);
       }
 
       // Messages (Subcollection)
       match /messages/{messageId} {
         // Members can read messages
         allow read: if isRoomMember(roomId);
-        
+
         // Members can send messages
-        allow create: if isRoomMember(roomId) && 
+        allow create: if isRoomMember(roomId) &&
                       hasRequiredFields(['id', 'roomId', 'senderId', 'ciphertext', 'nonce', 'signature', 'createdAt']) &&
                       request.resource.data.senderId == request.auth.uid &&
                       request.resource.data.roomId == roomId;
-        
+
         // Sender can delete their own messages for everyone
         allow delete: if isRoomMember(roomId) && resource.data.senderId == request.auth.uid;
       }

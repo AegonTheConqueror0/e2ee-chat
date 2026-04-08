@@ -343,7 +343,7 @@ export default function Chat({ user, keys }: ChatProps) {
     });
 
     return () => unsubscribe();
-  }, [activeRoom, roomKeys, user.uid]);
+  }, [activeRoom, roomKeys, user.uid, roomPinVerified]);
 
   // --- Scroll Position Tracking ---
 
@@ -623,8 +623,8 @@ export default function Chat({ user, keys }: ChatProps) {
         nonce: encrypted.nonce,
         signature: signature,
         createdAt: serverTimestamp(),
-        deliveredTo: [user.uid],
-        seenBy: [user.uid],
+        deliveredTo: [],
+        seenBy: [],
       });
     } catch (err) {
       toast.error('Failed to send message.');
@@ -677,8 +677,8 @@ export default function Chat({ user, keys }: ChatProps) {
         nonce: encrypted.nonce,
         signature,
         createdAt: serverTimestamp(),
-        deliveredTo: [user.uid],
-        seenBy: [user.uid],
+        deliveredTo: [],
+        seenBy: [],
       });
       toast.success('Location shared securely.');
     } catch (err) {
@@ -931,8 +931,8 @@ export default function Chat({ user, keys }: ChatProps) {
           nonce: msgEncrypted.nonce,
           signature: signature,
           createdAt: serverTimestamp(),
-          deliveredTo: [user.uid],
-          seenBy: [user.uid],
+          deliveredTo: [],
+          seenBy: [],
         });
         
         toast.success('File uploaded.');
@@ -1109,8 +1109,8 @@ export default function Chat({ user, keys }: ChatProps) {
     const otherMembers = activeRoom.members.filter(id => id !== user.uid);
     if (otherMembers.length === 0) return 'Seen';
 
-    const seenBy = msg.seenBy || [];
-    const allSeen = otherMembers.every(id => seenBy.includes(id));
+    const seenBy = new Set(msg.seenBy || []);
+    const allSeen = otherMembers.every(id => seenBy.has(id));
 
     return allSeen ? 'Seen' : 'Sent';
   };

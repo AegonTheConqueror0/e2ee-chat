@@ -71,6 +71,7 @@ export default function Chat({ user, keys }: ChatProps) {
   const [newRoomName, setNewRoomName] = useState('');
   const [isSodiumReady, setIsSodiumReady] = useState(false);
   const [showMobileSidebar, setShowMobileSidebar] = useState(true);
+  const [userStatusMap, setUserStatusMap] = useState<Record<string, { lastActive: number; status: 'online' | 'away' | 'inactive' }>>({});
   
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -98,6 +99,52 @@ export default function Chat({ user, keys }: ChatProps) {
   useEffect(() => {
     sodium.ready.then(() => setIsSodiumReady(true));
   }, []);
+
+  // --- User Status Tracking ---
+  useEffect(() => {
+    const q = query(collection(db, 'users'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const statusMap: typeof userStatusMap = {};
+      snapshot.docs.forEach(doc => {
+        const data = doc.data();
+        const lastActive = data.lastActive?.toDate?.()?.getTime() || 0;
+        const now = Date.now();
+        const diff = now - lastActive;
+        
+        let status: 'online' | 'away' | 'inactive';
+        if (diff < 2 * 60 * 1000) { // 2 minutes
+          status = 'online';
+        } else if (diff < 30 * 60 * 1000) { // 30 minutes
+          status = 'away';
+        } else {
+          status = 'inactive';
+        }
+        
+        statusMap[doc.id] = { lastActive, status };
+      });
+      setUserStatusMap(statusMap);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Update own lastActive timestamp periodically
+  useEffect(() => {
+    if (!user.uid) return;
+    
+    const updateLastActive = async () => {
+      try {
+        await setDoc(doc(db, 'users', user.uid), {
+          lastActive: serverTimestamp(),
+        }, { merge: true });
+      } catch (err) {
+        console.error('Failed to update lastActive:', err);
+      }
+    };
+    
+    updateLastActive();
+    const interval = setInterval(updateLastActive, 30000); // Update every 30 seconds
+    return () => clearInterval(interval);
+  }, [user.uid]);
 
   // --- Room Subscription ---
 
@@ -607,54 +654,76 @@ export default function Chat({ user, keys }: ChatProps) {
 
   // --- Render ---
 
+  const getStatusColor = (status: 'online' | 'away' | 'inactive') => {
+    switch (status) {
+      case 'online':
+        return 'bg-emerald-500';
+      case 'away':
+        return 'bg-yellow-500';
+      case 'inactive':
+        return 'bg-zinc-600';
+    }
+  };
+
+  const getStatusLabel = (status: 'online' | 'away' | 'inactive') => {
+    switch (status) {
+      case 'online':
+        return 'Online';
+      case 'away':
+        return 'Away';
+      case 'inactive':
+        return 'Inactive';
+    }
+  };
+
   const SidebarContent = () => (
     <div className="flex flex-col h-full bg-zinc-950">
-      <div className="p-4 md:p-6 border-b border-zinc-900 flex items-center justify-between">
-        <div className="flex items-center space-x-3">
-          <div className="p-2 rounded-xl bg-zinc-900 border border-zinc-800">
-            <Shield className="w-5 h-5 text-zinc-100" />
+      <div className="p-3 sm:p-4 md:p-6 border-b border-zinc-900 flex items-center justify-between">
+        <div className="flex items-center space-x-2 sm:space-x-3 min-w-0">
+          <div className="p-1.5 sm:p-2 rounded-lg sm:rounded-xl bg-zinc-900 border border-zinc-800 shrink-0">
+            <Shield className="w-4 h-4 sm:w-5 sm:h-5 text-zinc-100" />
           </div>
-          <h1 className="font-bold text-lg tracking-tight">E2EE Chat</h1>
+          <h1 className="font-bold text-base sm:text-lg md:text-xl tracking-tight truncate">E2EE Chat</h1>
         </div>
         <Sheet>
-          <SheetTrigger className="p-2 rounded-full hover:bg-zinc-900 transition-colors">
-            <Settings className="w-5 h-5 text-zinc-400" />
+          <SheetTrigger className="p-1.5 sm:p-2 rounded-full hover:bg-zinc-900 transition-colors">
+            <Settings className="w-4 h-4 sm:w-5 sm:h-5 text-zinc-400" />
           </SheetTrigger>
           <SheetContent side="left" className="bg-zinc-950 border-zinc-900 text-zinc-50">
             <SheetHeader>
               <SheetTitle className="text-zinc-100">Settings</SheetTitle>
             </SheetHeader>
-            <div className="py-8 space-y-6">
-              <div className="flex items-center space-x-4 p-4 rounded-2xl bg-zinc-900/50 border border-zinc-800">
-                <Avatar className="w-12 h-12 border-2 border-zinc-800">
+            <div className="py-4 sm:py-6 md:py-8 space-y-4 sm:space-y-6">
+              <div className="flex items-center space-x-2 sm:space-x-4 p-3 sm:p-4 rounded-xl sm:rounded-2xl bg-zinc-900/50 border border-zinc-800">
+                <Avatar className="w-10 h-10 sm:w-12 sm:h-12 border-2 border-zinc-800 shrink-0">
                   <AvatarImage src={user.photoURL || ''} />
                   <AvatarFallback className="bg-zinc-800 text-zinc-400">
                     {user.displayName?.[0] || 'U'}
                   </AvatarFallback>
                 </Avatar>
-                <div>
-                  <p className="font-semibold text-zinc-100">{user.displayName}</p>
-                  <p className="text-xs text-zinc-500">{user.email}</p>
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold text-sm sm:text-base text-zinc-100 truncate">{user.displayName}</p>
+                  <p className="text-[10px] text-zinc-500 truncate">{user.email}</p>
                 </div>
               </div>
               
-              <div className="space-y-4">
-                <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider px-2">Account Info</p>
-                <div className="p-4 rounded-2xl bg-zinc-900/50 border border-zinc-800 space-y-3">
+              <div className="space-y-3 sm:space-y-4">
+                <p className="text-[9px] sm:text-xs font-medium text-zinc-500 uppercase tracking-wider px-2">Account Info</p>
+                <div className="p-3 sm:p-4 rounded-xl sm:rounded-2xl bg-zinc-900/50 border border-zinc-800 space-y-2 sm:space-y-3">
                   <div>
-                    <p className="text-[10px] text-zinc-500 mb-1">Your UID</p>
-                    <p className="text-[10px] font-mono text-zinc-400 break-all bg-zinc-950 p-2 rounded-lg border border-zinc-800">{user.uid}</p>
+                    <p className="text-[9px] text-zinc-500 mb-1">Your UID</p>
+                    <p className="text-[9px] font-mono text-zinc-400 break-all bg-zinc-950 p-2 rounded-lg border border-zinc-800">{user.uid}</p>
                   </div>
                   <div>
-                    <p className="text-[10px] text-zinc-500 mb-1">Your Email</p>
-                    <p className="text-[10px] font-mono text-zinc-400 break-all bg-zinc-950 p-2 rounded-lg border border-zinc-800">{user.email}</p>
+                    <p className="text-[9px] text-zinc-500 mb-1">Your Email</p>
+                    <p className="text-[9px] font-mono text-zinc-400 break-all bg-zinc-950 p-2 rounded-lg border border-zinc-800">{user.email}</p>
                   </div>
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={refreshProfile}
                     disabled={loading}
-                    className="w-full border-zinc-800 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100 h-8 text-[10px]"
+                    className="w-full border-zinc-800 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100 h-8 text-[9px] sm:text-[10px]"
                   >
                     {loading ? <Loader2 className="w-3 h-3 animate-spin mr-2" /> : <Shield className="w-3 h-3 mr-2" />}
                     Refresh Public Profile
@@ -780,11 +849,14 @@ export default function Chat({ user, keys }: ChatProps) {
                   className="flex items-center justify-between p-2 rounded-xl hover:bg-zinc-900 transition-colors group"
                 >
                   <div className="flex items-center space-x-3 overflow-hidden">
-                    <Avatar className="w-8 h-8 border border-zinc-800">
-                      <AvatarFallback className="bg-zinc-800 text-[10px] text-zinc-500">
-                        {u.email?.[0].toUpperCase() || 'U'}
-                      </AvatarFallback>
-                    </Avatar>
+                    <div className="relative">
+                      <Avatar className="w-8 h-8 border border-zinc-800">
+                        <AvatarFallback className="bg-zinc-800 text-[10px] text-zinc-500">
+                          {u.email?.[0].toUpperCase() || 'U'}
+                        </AvatarFallback>
+                      </Avatar>
+                      <div className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-zinc-950 ${getStatusColor(userStatusMap[u.id]?.status || 'inactive')}`} />
+                    </div>
                     <div className="overflow-hidden">
                       <p className="text-xs font-semibold text-zinc-100 truncate">{u.email}</p>
                       <p className="text-[10px] text-zinc-500 truncate font-mono">{u.uid.slice(0, 12)}...</p>
@@ -834,13 +906,16 @@ export default function Chat({ user, keys }: ChatProps) {
         {activeRoom ? (
           <>
             {/* Chat Header */}
-            <div className="p-4 md:p-6 border-b border-zinc-900 bg-zinc-950/50 backdrop-blur-xl flex items-center justify-between sticky top-0 z-10">
+            <div className="p-3 sm:p-4 md:p-6 border-b border-zinc-900 bg-zinc-950/50 backdrop-blur-xl flex items-center justify-between sticky top-0 z-10">
               <div className="flex items-center space-x-4 overflow-hidden">
                 <Button 
                   variant="ghost" 
                   size="icon" 
                   className="md:hidden text-zinc-400"
-                  onClick={() => setShowMobileSidebar(true)}
+                  onClick={() => {
+                    setActiveRoom(null);
+                    setShowMobileSidebar(true);
+                  }}
                 >
                   <ChevronLeft className="w-6 h-6" />
                 </Button>
@@ -961,12 +1036,29 @@ export default function Chat({ user, keys }: ChatProps) {
                       <div className="space-y-2">
                         <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Members</p>
                         <div className="space-y-2">
-                          {activeRoom.members.map(m => (
-                            <div key={m} className="flex items-center justify-between p-3 rounded-xl bg-zinc-900/50 border border-zinc-800">
-                              <span className="text-xs font-mono text-zinc-400">{m.slice(0, 12)}...</span>
-                              {m === user.uid && <Badge className="bg-zinc-800 text-zinc-400 text-[10px]">You</Badge>}
-                            </div>
-                          ))}
+                          {activeRoom.members.map(m => {
+                            const memberData = allUsers.find(u => u.id === m);
+                            const memberStatus = userStatusMap[m]?.status || 'inactive';
+                            return (
+                              <div key={m} className="flex items-center justify-between p-3 rounded-xl bg-zinc-900/50 border border-zinc-800">
+                                <div className="flex items-center space-x-2 overflow-hidden flex-1">
+                                  <div className="relative">
+                                    <Avatar className="w-6 h-6 border border-zinc-800 shrink-0">
+                                      <AvatarFallback className="bg-zinc-800 text-[8px] text-zinc-500">
+                                        {memberData?.email?.[0].toUpperCase() || 'U'}
+                                      </AvatarFallback>
+                                    </Avatar>
+                                    <div className={`absolute bottom-0 right-0 w-2 h-2 rounded-full border border-zinc-950 ${getStatusColor(memberStatus)}`} />
+                                  </div>
+                                  <div className="overflow-hidden flex-1">
+                                    <p className="text-xs font-semibold text-zinc-100 truncate">{memberData?.email || m.slice(0, 12)}</p>
+                                    <p className="text-[10px] text-zinc-500">{getStatusLabel(memberStatus)}</p>
+                                  </div>
+                                </div>
+                                {m === user.uid && <Badge className="bg-zinc-800 text-zinc-400 text-[10px] shrink-0">You</Badge>}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
 
@@ -995,8 +1087,8 @@ export default function Chat({ user, keys }: ChatProps) {
             </div>
 
             {/* Messages Area */}
-            <ScrollArea className="flex-1 p-3 md:p-8">
-              <div className="max-w-4xl mx-auto space-y-4 md:space-y-8">
+            <ScrollArea className="flex-1 p-2 sm:p-3 md:p-8">
+              <div className="max-w-4xl mx-auto space-y-3 sm:space-y-4 md:space-y-8">
                 {messages.map((msg, i) => {
                   const isMine = msg.senderId === user.uid;
                   const prevMsg = messages[i - 1];
@@ -1011,8 +1103,8 @@ export default function Chat({ user, keys }: ChatProps) {
                   }
 
                   return (
-                    <div key={msg.id} className={`flex items-end space-x-2 md:space-x-4 ${isMine ? 'flex-row-reverse space-x-reverse' : ''}`}>
-                      <div className={`w-6 h-6 md:w-10 md:h-10 shrink-0 ${!showAvatar ? 'opacity-0' : ''}`}>
+                    <div key={msg.id} className={`flex items-end space-x-1.5 sm:space-x-2 md:space-x-4 ${isMine ? 'flex-row-reverse space-x-reverse' : ''}`}>
+                      <div className={`w-5 h-5 sm:w-6 sm:h-6 md:w-10 md:h-10 shrink-0 ${!showAvatar ? 'opacity-0' : ''}`}>
                         <Avatar className="w-full h-full border-2 border-zinc-900">
                           <AvatarFallback className="bg-zinc-900 text-[10px] md:text-xs text-zinc-500">
                             {msg.senderId.slice(0, 2).toUpperCase()}
@@ -1020,29 +1112,29 @@ export default function Chat({ user, keys }: ChatProps) {
                         </Avatar>
                       </div>
                       
-                      <div className={`flex flex-col max-w-[85%] md:max-w-[70%] ${isMine ? 'items-end' : 'items-start'}`}>
+                      <div className={`flex flex-col max-w-[80%] sm:max-w-[75%] md:max-w-[70%] ${isMine ? 'items-end' : 'items-start'}`}>
                         {showAvatar && (
-                          <span className="text-[10px] text-zinc-600 mb-1 px-1 font-mono">
+                          <span className="text-[9px] sm:text-[10px] text-zinc-600 mb-0.5 sm:mb-1 px-1 font-mono">
                             {msg.senderId.slice(0, 8)}...
                           </span>
                         )}
                         
-                        <div className={`group relative p-3 md:p-4 rounded-2xl md:rounded-3xl ${
+                        <div className={`group relative p-2 sm:p-3 md:p-4 rounded-xl sm:rounded-2xl md:rounded-3xl ${
                           isMine 
                             ? 'bg-zinc-100 text-zinc-950 rounded-tr-none' 
                             : 'bg-zinc-900 text-zinc-100 rounded-tl-none border border-zinc-800'
                         }`}>
                           {fileData ? (
-                            <div className="flex items-center space-x-3">
-                              <div className={`p-2 md:p-3 rounded-xl ${isMine ? 'bg-zinc-200' : 'bg-zinc-800'}`}>
-                                <Paperclip className="w-4 h-4 md:w-5 md:h-5" />
+                            <div className="flex items-center space-x-2 sm:space-x-3">
+                              <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${isMine ? 'bg-zinc-200' : 'bg-zinc-800'}`}>
+                                <Paperclip className="w-3.5 h-3.5 sm:w-4 sm:h-4 md:w-5 md:h-5" />
                               </div>
-                              <div className="overflow-hidden">
-                                <p className="text-xs md:text-sm font-semibold truncate">{fileData.name}</p>
+                              <div className="overflow-hidden min-w-0">
+                                <p className="text-[10px] sm:text-xs md:text-sm font-semibold truncate">{fileData.name}</p>
                                 <Button 
                                   variant="link" 
                                   size="sm" 
-                                  className={`h-auto p-0 text-[10px] md:text-xs ${isMine ? 'text-zinc-600' : 'text-zinc-400'}`}
+                                  className={`h-auto p-0 text-[9px] sm:text-[10px] md:text-xs ${isMine ? 'text-zinc-600' : 'text-zinc-400'}`}
                                   onClick={() => window.open(fileData.url)}
                                 >
                                   <Download className="w-3 h-3 mr-1" />
@@ -1051,7 +1143,7 @@ export default function Chat({ user, keys }: ChatProps) {
                               </div>
                             </div>
                           ) : (
-                            <p className="text-xs md:text-sm leading-relaxed whitespace-pre-wrap break-words">
+                            <p className="text-[13px] sm:text-xs md:text-sm leading-relaxed whitespace-pre-wrap break-words">
                               {msg.decryptedText}
                             </p>
                           )}
@@ -1063,7 +1155,7 @@ export default function Chat({ user, keys }: ChatProps) {
                           </div>
                         </div>
                         
-                        <span className="text-[10px] text-zinc-600 mt-1.5 px-1">
+                        <span className="text-[9px] sm:text-[10px] text-zinc-600 mt-1 sm:mt-1.5 px-1">
                           {msg.createdAt?.toDate ? format(msg.createdAt.toDate(), 'HH:mm') : '...'}
                         </span>
                       </div>
@@ -1075,9 +1167,9 @@ export default function Chat({ user, keys }: ChatProps) {
             </ScrollArea>
 
             {/* Input Area */}
-            <div className="p-3 md:p-8 border-t border-zinc-900 bg-zinc-950/50 backdrop-blur-xl">
+            <div className="p-2 sm:p-3 md:p-8 border-t border-zinc-900 bg-zinc-950/50 backdrop-blur-xl">
               <div className="max-w-4xl mx-auto">
-                <div className="relative flex items-end space-x-2 md:space-x-4 bg-zinc-900/50 border border-zinc-800 p-2 md:p-3 rounded-2xl md:rounded-3xl focus-within:border-zinc-700 transition-colors shadow-inner">
+                <div className="relative flex items-end space-x-1.5 sm:space-x-2 md:space-x-4 bg-zinc-900/50 border border-zinc-800 p-1.5 sm:p-2 md:p-3 rounded-xl sm:rounded-2xl md:rounded-3xl focus-within:border-zinc-700 transition-colors shadow-inner">
                   <div className="flex items-center">
                     <input
                       type="file"
@@ -1085,39 +1177,43 @@ export default function Chat({ user, keys }: ChatProps) {
                       className="hidden"
                       onChange={handleFileUpload}
                     />
-                    <label htmlFor="file-upload" className="cursor-pointer h-10 w-10 md:h-12 md:w-12 flex items-center justify-center rounded-xl md:rounded-2xl text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition-colors">
-                      <Paperclip className="w-5 h-5 md:w-6 md:h-6" />
+                    <label htmlFor="file-upload" className="cursor-pointer h-9 w-9 sm:h-10 sm:w-10 md:h-12 md:w-12 flex items-center justify-center rounded-lg sm:rounded-xl md:rounded-2xl text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition-colors active:scale-95">
+                      <Paperclip className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6" />
                     </label>
                   </div>
                   
                   <textarea
                     rows={1}
                     value={newMessage}
-                    onChange={(e) => setNewMessage(e.target.value)}
+                    onChange={(e) => {
+                      setNewMessage(e.target.value);
+                      e.currentTarget.style.height = 'auto';
+                      e.currentTarget.style.height = Math.min(e.currentTarget.scrollHeight, 128) + 'px';
+                    }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
                         handleSendMessage();
                       }
                     }}
-                    placeholder={!roomKeys[activeRoom.id] ? "Waiting for secure key..." : "Type an encrypted message..."}
+                    placeholder={!roomKeys[activeRoom.id] ? "Waiting for secure key..." : "Type a message..."}
                     disabled={!roomKeys[activeRoom.id]}
-                    className="flex-1 bg-transparent border-none focus:ring-0 text-zinc-100 placeholder:text-zinc-600 resize-none py-2.5 md:py-3.5 text-sm md:text-base max-h-32 min-h-[40px]"
+                    className="flex-1 bg-transparent border-none focus:ring-0 text-zinc-100 placeholder:text-zinc-600 resize-none py-2 sm:py-2.5 md:py-3.5 px-1 sm:px-2 text-[13px] sm:text-sm md:text-base max-h-32 min-h-[36px]"
                   />
                   
                   <Button 
                     size="icon"
                     onClick={handleSendMessage}
                     disabled={!newMessage.trim() || loading || !roomKeys[activeRoom.id]}
-                    className="h-10 w-10 md:h-12 md:w-12 rounded-xl md:rounded-2xl bg-zinc-100 text-zinc-950 hover:bg-zinc-200 shrink-0 shadow-lg active:scale-95 transition-transform"
+                    className="h-9 w-9 sm:h-10 sm:w-10 md:h-12 md:w-12 rounded-lg sm:rounded-xl md:rounded-2xl bg-zinc-100 text-zinc-950 hover:bg-zinc-200 shrink-0 shadow-lg active:scale-95 transition-transform"
                   >
-                    {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5 md:w-6 md:h-6" />}
+                    {loading ? <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> : <Send className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6" />}
                   </Button>
                 </div>
-                <div className="mt-3 flex items-center justify-center space-x-2">
-                  <Shield className="w-3 h-3 text-emerald-500/50" />
-                  <p className="text-[10px] text-zinc-600 font-medium uppercase tracking-widest">
-                    Military-Grade End-to-End Encryption Active
+                <div className="mt-2 sm:mt-3 flex items-center justify-center space-x-1.5 sm:space-x-2">
+                  <Shield className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-emerald-500/50 shrink-0" />
+                  <p className="text-[9px] sm:text-[10px] text-zinc-600 font-medium uppercase tracking-wider">
+                    Encrypted
                   </p>
                 </div>
               </div>

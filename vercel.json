@@ -1,0 +1,40 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "installCommand": "npm install",
+  "framework": null,
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "X-XSS-Protection",
+          "value": "1; mode=block"
+        }
+      ]
+    }
+  ],
+  "env": {
+    "VITE_FIREBASE_API_KEY": "AIzaSyC-jmP61Tr_rxPakqvwlJ7HT8M4UTCJEvQ",
+    "VITE_FIREBASE_AUTH_DOMAIN": "rojas-store-database.firebaseapp.com",
+    "VITE_FIREBASE_PROJECT_ID": "rojas-store-database",
+    "VITE_FIREBASE_STORAGE_BUCKET": "rojas-store-database.firebasestorage.app",
+    "VITE_FIREBASE_MESSAGING_SENDER_ID": "344053498624",
+    "VITE_FIREBASE_APP_ID": "1:344053498624:web:dfc81494c2a8c214e1e9e5",
+    "VITE_FIREBASE_MEASUREMENT_ID": ""
+  }
+}
